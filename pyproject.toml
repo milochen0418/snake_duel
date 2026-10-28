@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "snake-duel"
+version = "0.1.0"
+description = "Snake Duel (雙蛇搶食): two snakes on one board after the same food, you against the model the AI Hub sets. The AI decides where to go, its snake finds the way; every match is kept per model, so models can be compared. For *.reflex-ddns.com."
+authors = ["Milo Chen"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "snake_duel"}]
+
+[tool.poetry.dependencies]
+# Developed on 3.15; 3.11 stays allowed for the re_ddns App Store image (python:3.11).
+python = ">=3.11,<3.16"
+reflex = "0.10.0"
+# The AI snake's mind: the AI Hub's models (reflex_ddns_auth.ai); the game holds no model or key.
+reflex-ddns-auth = {path = "../reflex_ddns_auth", develop = true}
+httpx = ">=0.28"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+playwright = "^1.42.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
