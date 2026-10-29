@@ -1,14 +1,19 @@
 // Snake Duel's arena. The server sends the board once a step, as JSON in the canvas's
-// data-frame; this draws it, gliding the snakes from one step to the next, with the AI's way,
-// the food and a little burst when something is eaten or someone crashes. It also turns swipes
-// on the board and the on-screen pad into arrow keys (the page's key listener sends those to the
-// server), and keeps the arrow keys from scrolling the page while the arena is shown.
+// data-frame; this draws it, gliding the snakes from one step to the next, with where each AI
+// snake is heading, the food and a little burst when something is eaten or someone crashes. It
+// also turns swipes on the board and the on-screen pad into arrow keys (the page's key listener
+// sends those to the server), and keeps the arrow keys from scrolling the page while the arena is
+// shown.
 (() => {
   "use strict";
 
+  // Each snake's colours, by its id (the page uses the same ones: snake_duel/views.py).
   const COLORS = {
     you: { light: "#fde68a", body: "#f59e0b", dark: "#92400e" },
-    ai: { light: "#a5f3fc", body: "#22d3ee", dark: "#155e75" },
+    ai1: { light: "#a5f3fc", body: "#22d3ee", dark: "#155e75" },
+    ai2: { light: "#ddd6fe", body: "#a78bfa", dark: "#5b21b6" },
+    ai3: { light: "#d9f99d", body: "#a3e635", dark: "#3f6212" },
+    ai4: { light: "#fbcfe8", body: "#f472b6", dark: "#9d174d" },
   };
   const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
   const GLIDE = 0.55; // of a step: how long a snake takes to slide into its next cell
@@ -18,7 +23,7 @@
   let ctx = null;
   let raw = "";
   let cur = null;
-  let prev = null;
+  let prev = null; // the step before, by snake id
   let at = 0;
   let effects = [];
   let cssW = 0;
@@ -27,6 +32,11 @@
 
   const lerp = (a, b, t) => a + (b - a) * t;
   const near = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) === 1;
+  const colors = (id) => COLORS[id] || COLORS.ai1;
+  const alpha = (hex, a) => {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+  };
 
   function attach() {
     const el = document.getElementById("arena");
@@ -50,7 +60,7 @@
       return;
     }
     // Glide only from the step just before (a new match starts again at 0).
-    prev = cur && next.t === cur.t + 1 ? cur : null;
+    prev = cur && next.t === cur.t + 1 ? Object.fromEntries(cur.snakes.map((s) => [s.id, s])) : null;
     cur = next;
     at = performance.now();
     for (const fx of next.fx || []) burst(fx);
@@ -77,7 +87,7 @@
     const [x, y] = fx.cell;
     const now = performance.now();
     if (fx.kind === "eat" || fx.kind === "crash") {
-      const color = fx.kind === "crash" ? "#fb7185" : fx.food === "gold" ? "#fde047" : COLORS[fx.who].body;
+      const color = fx.kind === "crash" ? "#fb7185" : fx.food === "gold" ? "#fde047" : colors(fx.who).body;
       const parts = [];
       for (let i = 0; i < 14; i++) {
         const a = (Math.PI * 2 * i) / 14 + Math.random() * 0.4;
@@ -87,7 +97,7 @@
       const text = fx.kind === "crash" ? "−3" : "+" + fx.points;
       effects.push({ kind: "burst", x, y, born: now, life: 700, color, parts, text, textColor: fx.kind === "crash" ? "#fda4af" : color });
     } else if (fx.kind === "back") {
-      effects.push({ kind: "ring", x, y, born: now, life: 900, color: COLORS[fx.who].light });
+      effects.push({ kind: "ring", x, y, born: now, life: 900, color: colors(fx.who).light });
     } else if (fx.kind === "gold") {
       effects.push({ kind: "ring", x, y, born: now, life: 900, color: "#fde047" });
     } else if (fx.kind === "gone") {
@@ -132,32 +142,32 @@
     ctx.fillRect(0, 0, cssW, cssH);
     ctx.fillStyle = "rgba(148, 163, 184, 0.05)";
     for (let y = 0; y < cur.h; y++) {
-      for (let x = (y % 2); x < cur.w; x += 2) ctx.fillRect(x * cell, y * cell, cell, cell);
+      for (let x = y % 2; x < cur.w; x += 2) ctx.fillRect(x * cell, y * cell, cell, cell);
     }
     ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
     ctx.lineWidth = 2;
     ctx.strokeRect(1, 1, cssW - 2, cssH - 2);
   }
 
-  function drawAim(cell, now) {
-    if (!cur.ai.body.length) return;
-    ctx.fillStyle = "rgba(103, 232, 249, 0.35)";
-    for (const [x, y] of cur.way || []) {
+  function drawAims(cell, now) {
+    for (const { id, aim, way } of cur.aims || []) {
+      const c = colors(id);
+      ctx.fillStyle = alpha(c.light, 0.35);
+      for (const [x, y] of way || []) {
+        ctx.beginPath();
+        ctx.arc((x + 0.5) * cell, (y + 0.5) * cell, Math.max(1.5, cell * 0.08), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.save();
+      ctx.strokeStyle = alpha(c.light, 0.9);
+      ctx.lineWidth = Math.max(1.5, cell * 0.07);
+      ctx.setLineDash([cell * 0.18, cell * 0.14]);
+      ctx.lineDashOffset = -now / 60;
       ctx.beginPath();
-      ctx.arc((x + 0.5) * cell, (y + 0.5) * cell, Math.max(1.5, cell * 0.08), 0, Math.PI * 2);
-      ctx.fill();
+      ctx.arc((aim[0] + 0.5) * cell, (aim[1] + 0.5) * cell, cell * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
-    if (!cur.aim) return;
-    const [x, y] = cur.aim;
-    ctx.save();
-    ctx.strokeStyle = "rgba(103, 232, 249, 0.9)";
-    ctx.lineWidth = Math.max(1.5, cell * 0.07);
-    ctx.setLineDash([cell * 0.18, cell * 0.14]);
-    ctx.lineDashOffset = -now / 60;
-    ctx.beginPath();
-    ctx.arc((x + 0.5) * cell, (y + 0.5) * cell, cell * 0.62, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
   }
 
   function star(cx, cy, r) {
@@ -228,11 +238,10 @@
     return pts;
   }
 
-  function drawSnake(who, cell, t) {
-    const s = cur[who];
+  function drawSnake(s, cell, t) {
     if (!s.body.length) return;
-    const c = COLORS[who];
-    const pts = points(s, prev && prev[who], t);
+    const c = colors(s.id);
+    const pts = points(s, prev && prev[s.id], t);
     const line = (width, color) => {
       ctx.strokeStyle = color;
       ctx.lineWidth = width;
@@ -272,16 +281,14 @@
 
   function drawNames(cell) {
     // Before the start: which snake is whose.
-    for (const who of ["you", "ai"]) {
-      const s = cur[who];
+    for (const s of cur.snakes) {
       if (!s.body.length) continue;
       const [x, y] = s.body[0];
-      const name = canvas.dataset[who] || who;
       ctx.font = `bold ${Math.round(cell * 0.5)}px ui-sans-serif, system-ui, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = COLORS[who].light;
-      ctx.fillText(name, (x + 0.5) * cell, (y - 0.15) * cell);
+      ctx.fillStyle = colors(s.id).light;
+      ctx.fillText(s.n, (x + 0.5) * cell, (y - 0.15) * cell);
     }
   }
 
@@ -292,10 +299,11 @@
     const t = prev ? Math.min(1, (now - at) / (cur.ms * GLIDE)) : 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     drawGround(cell);
-    drawAim(cell, now);
+    drawAims(cell, now);
     drawFood(cell, now);
-    drawSnake("ai", cell, t);
-    drawSnake("you", cell, t);
+    // the person's snake on top
+    for (const s of cur.snakes) if (s.id !== "you") drawSnake(s, cell, t);
+    for (const s of cur.snakes) if (s.id === "you") drawSnake(s, cell, t);
     if (["warmup", "countdown"].includes(canvas.dataset.phase)) drawNames(cell);
     drawEffects(cell, now);
   }

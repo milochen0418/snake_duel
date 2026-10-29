@@ -1,4 +1,4 @@
-"""The page: the lobby, the arena with both scores and what the AI is doing, and the result."""
+"""The page: the lobby, the arena with the scores and what each AI snake is doing, and the result."""
 
 from __future__ import annotations
 
@@ -6,13 +6,24 @@ import reflex as rx
 
 from snake_duel.history import ModelRow
 from snake_duel.match import Decision
-from snake_duel.state import Game
+from snake_duel.state import AiCard, Game, Place
 
 T = Game.t
 
 CARD = "rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5"
 YOU = "text-amber-300"
 AI = "text-cyan-300"
+# Each snake's colour, by its id (the canvas draws them the same: assets/snake_duel/arena.js).
+TEXT_COLORS = {"you": YOU, "ai1": AI, "ai2": "text-violet-300", "ai3": "text-lime-300", "ai4": "text-pink-300"}
+DOT_COLORS = {"you": "bg-amber-400", "ai1": "bg-cyan-400", "ai2": "bg-violet-400", "ai3": "bg-lime-400", "ai4": "bg-pink-400"}
+
+
+def _color(sid: rx.Var, colors: dict[str, str], extra: str = "") -> rx.Var:
+    return rx.match(sid, *[(k, f"{v} {extra}".strip()) for k, v in colors.items()], f"text-slate-300 {extra}".strip())
+
+
+def _dot(sid: rx.Var) -> rx.Component:
+    return rx.el.span(class_name=_color(sid, DOT_COLORS, "inline-block h-2.5 w-2.5 shrink-0 rounded-full"))
 
 
 def _chip(label: rx.Var | str, active: rx.Var | bool, on_click: rx.EventHandler, test_id: str) -> rx.Component:
@@ -97,25 +108,39 @@ def opponent_card() -> rx.Component:
     )
 
 
+def _setting(label: rx.Var, *chips: rx.Component, first: bool = False) -> rx.Component:
+    return rx.el.div(
+        rx.el.div(label, class_name="mb-2 text-sm text-slate-400"),
+        rx.el.div(*chips, class_name="flex flex-wrap gap-2"),
+        class_name="" if first else "mt-4",
+    )
+
+
 def settings_card() -> rx.Component:
     return rx.el.div(
-        rx.el.div(
-            rx.el.div(T["speed"], class_name="mb-2 text-sm text-slate-400"),
+        _setting(
+            T["mode"],
+            _chip(T["mode_duel"], Game.mode == "duel", Game.set_mode("duel"), "mode-duel"),
+            _chip(T["mode_crowd"], Game.mode == "crowd", Game.set_mode("crowd"), "mode-crowd"),
+            first=True,
+        ),
+        rx.cond(
+            Game.mode == "crowd",
             rx.el.div(
-                _chip(T["speed_slow"], Game.speed == "slow", Game.set_speed("slow"), "speed-slow"),
-                _chip(T["speed_normal"], Game.speed == "normal", Game.set_speed("normal"), "speed-normal"),
-                _chip(T["speed_fast"], Game.speed == "fast", Game.set_speed("fast"), "speed-fast"),
-                class_name="flex flex-wrap gap-2",
+                _setting(T["crowd"], *[_chip(rx.fragment(n, T["crowd_suffix"]), Game.crowd == n, Game.set_crowd(n), f"crowd-{n}") for n in ("2", "3", "4")]),
+                rx.el.p(T["crowd_note"], class_name="mt-2 text-sm text-slate-400"),
             ),
         ),
-        rx.el.div(
-            rx.el.div(T["length"], class_name="mb-2 text-sm text-slate-400"),
-            rx.el.div(
-                _chip(T["length_60"], Game.length == "60", Game.set_length("60"), "length-60"),
-                _chip(T["length_120"], Game.length == "120", Game.set_length("120"), "length-120"),
-                class_name="flex flex-wrap gap-2",
-            ),
-            class_name="mt-4",
+        _setting(
+            T["speed"],
+            _chip(T["speed_slow"], Game.speed == "slow", Game.set_speed("slow"), "speed-slow"),
+            _chip(T["speed_normal"], Game.speed == "normal", Game.set_speed("normal"), "speed-normal"),
+            _chip(T["speed_fast"], Game.speed == "fast", Game.set_speed("fast"), "speed-fast"),
+        ),
+        _setting(
+            T["length"],
+            _chip(T["length_60"], Game.length == "60", Game.set_length("60"), "length-60"),
+            _chip(T["length_120"], Game.length == "120", Game.set_length("120"), "length-120"),
         ),
         rx.el.button(
             rx.icon("play", size=18),
@@ -133,7 +158,7 @@ def rules_card() -> rx.Component:
     return rx.el.div(
         rx.el.div(T["rules_title"], class_name="mb-2 font-semibold"),
         rx.el.ol(
-            *[rx.el.li(T[f"rule_{i}"]) for i in range(1, 6)],
+            *[rx.el.li(T[f"rule_{i}"]) for i in range(1, 7)],
             class_name="list-decimal space-y-1.5 pl-5 text-sm leading-relaxed text-slate-300",
         ),
         class_name=CARD,
@@ -142,7 +167,11 @@ def rules_card() -> rx.Component:
 
 def _board_row(row: ModelRow) -> rx.Component:
     return rx.el.tr(
-        rx.el.td(row.model, class_name="max-w-[14rem] break-all py-2 pr-3 font-mono text-cyan-200"),
+        rx.el.td(
+            rx.el.div(row.model, class_name="font-mono text-cyan-200"),
+            rx.el.div(row.mode, class_name="text-xs text-slate-400"),
+            class_name="max-w-[14rem] break-all py-2 pr-3",
+        ),
         rx.el.td(row.matches, class_name="py-2 pr-3 text-right font-mono"),
         rx.el.td(
             rx.el.span(row.you_won, class_name=YOU),
@@ -155,7 +184,7 @@ def _board_row(row: ModelRow) -> rx.Component:
         rx.el.td(row.ai_points, class_name="py-2 pr-3 text-right font-mono"),
         rx.el.td(row.ai_crashes, class_name="py-2 pr-3 text-right font-mono"),
         rx.el.td(row.ai_secs, class_name="py-2 text-right font-mono"),
-        class_name="border-t border-slate-800",
+        class_name="border-t border-slate-800 align-top",
     )
 
 
@@ -204,31 +233,52 @@ def lobby() -> rx.Component:
 # ------------------------------------------------------------ the match
 
 
-def _score(who: str, label: rx.Var, score: rx.Var, color: str, test_id: str, sub: rx.Component) -> rx.Component:
+def _my_score() -> rx.Component:
     return rx.el.div(
-        rx.el.div(label, class_name=f"text-xs uppercase tracking-wider {color} opacity-80"),
-        rx.el.div(score, data_testid=test_id, class_name=f"font-mono text-3xl font-bold {color} tabular-nums"),
-        sub,
-        class_name="min-w-0 " + ("text-left" if who == "you" else "text-right"),
+        rx.el.div(T["you"], class_name=f"text-xs uppercase tracking-wider {YOU} opacity-80"),
+        rx.el.div(Game.my_score, data_testid="my-score", class_name=f"font-mono text-3xl font-bold {YOU} tabular-nums"),
+        rx.cond(Game.my_out != "", rx.el.div(T["you_out"], " ", Game.my_out, " ", T["sec"], data_testid="my-out", class_name="text-xs text-rose-300")),
+        class_name="min-w-0",
+    )
+
+
+def _clock() -> rx.Component:
+    return rx.el.div(
+        rx.el.div(Game.left, data_testid="left", class_name="font-mono text-2xl font-semibold tabular-nums text-slate-100"),
+        rx.el.div(T["sec"], class_name="text-xs text-slate-400"),
+        class_name="text-center",
+    )
+
+
+def _ai_score_chip(card: AiCard) -> rx.Component:
+    return rx.el.div(
+        _dot(card.id),
+        rx.el.span(card.name, class_name="text-xs text-slate-300"),
+        rx.el.span(card.score, class_name=_color(card.id, TEXT_COLORS, "font-mono text-lg font-bold tabular-nums")),
+        data_testid="ai-score",
+        class_name="flex items-center gap-1.5",
     )
 
 
 def scoreboard() -> rx.Component:
-    return rx.el.div(
-        _score(
-            "you",
-            T["you"],
-            Game.my_score,
-            YOU,
-            "my-score",
-            rx.cond(Game.my_out != "", rx.el.div(T["you_out"], " ", Game.my_out, " ", T["sec"], data_testid="my-out", class_name="text-xs text-rose-300"), rx.el.div()),
+    their_side = rx.cond(
+        Game.playing_crowd,
+        rx.el.div(
+            rx.el.div(rx.foreach(Game.ais, _ai_score_chip), class_name="flex flex-wrap justify-end gap-x-3 gap-y-1"),
+            rx.el.div(Game.foe_name, class_name="mt-0.5 truncate font-mono text-xs text-slate-400"),
+            class_name="min-w-0 text-right",
         ),
         rx.el.div(
-            rx.el.div(Game.left, data_testid="left", class_name="font-mono text-2xl font-semibold tabular-nums text-slate-100"),
-            rx.el.div(T["sec"], class_name="text-xs text-slate-400"),
-            class_name="text-center",
+            rx.el.div(T["ai"], class_name=f"text-xs uppercase tracking-wider {AI} opacity-80"),
+            rx.el.div(Game.ais[0].score, data_testid="ai-score", class_name=f"font-mono text-3xl font-bold {AI} tabular-nums"),
+            rx.el.div(Game.foe_name, class_name="truncate font-mono text-xs text-slate-400"),
+            class_name="min-w-0 text-right",
         ),
-        _score("ai", T["ai"], Game.ai_score, AI, "ai-score", rx.el.div(Game.foe_name, class_name="truncate font-mono text-xs text-slate-400")),
+    )
+    return rx.el.div(
+        _my_score(),
+        _clock(),
+        their_side,
         class_name="grid grid-cols-[1fr_auto_1fr] items-center gap-3 rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-2",
     )
 
@@ -244,9 +294,10 @@ def _overlay() -> rx.Component:
             "result",
             rx.el.div(
                 rx.el.div(
-                    rx.match(Game.winner, ("you", T["you_win"]), ("ai", T["ai_win"]), T["draw"]),
+                    Game.outcome,
+                    data_testid="outcome",
                     class_name=rx.match(
-                        Game.winner,
+                        Game.outcome_tone,
                         ("you", "text-5xl font-black text-amber-300 drop-shadow-lg"),
                         ("ai", "text-5xl font-black text-cyan-300 drop-shadow-lg"),
                         "text-5xl font-black text-slate-200 drop-shadow-lg",
@@ -265,8 +316,6 @@ def arena() -> rx.Component:
             id="arena",
             data_frame=Game.frame,
             data_phase=Game.phase,
-            data_you=T["you"],
-            data_ai=T["ai"],
             data_testid="arena",
             class_name="block aspect-[3/2] w-full touch-none select-none rounded-xl",
         ),
@@ -275,12 +324,12 @@ def arena() -> rx.Component:
     )
 
 
-def _pad_button(icon: str, key: str, extra: str = "") -> rx.Component:
+def _pad_button(icon: str, key: str) -> rx.Component:
     return rx.el.button(
         rx.icon(icon, size=22),
         data_key=key,
         aria_label=key,
-        class_name=f"flex h-12 w-12 items-center justify-center rounded-xl border border-slate-700 bg-slate-800/80 text-slate-200 active:bg-amber-400 active:text-slate-950 {extra}",
+        class_name="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-700 bg-slate-800/80 text-slate-200 active:bg-amber-400 active:text-slate-950",
     )
 
 
@@ -296,10 +345,42 @@ def pad() -> rx.Component:
     )
 
 
+def ai_card(card: AiCard) -> rx.Component:
+    return rx.el.div(
+        rx.el.div(
+            rx.el.span(_dot(card.id), class_name=rx.cond(card.state == "thinking", "flex animate-pulse", "flex")),
+            rx.el.span(card.name, class_name=_color(card.id, TEXT_COLORS, "text-sm font-semibold")),
+            rx.el.span(card.status, data_testid="ai-status", class_name="text-sm text-slate-300"),
+            class_name="flex items-center gap-2",
+        ),
+        rx.cond(card.slow, rx.el.p(T["slow_note"], data_testid="slow-note", class_name="mt-2 text-sm leading-relaxed text-amber-200")),
+        rx.cond(
+            card.aim != "",
+            rx.el.div(
+                rx.el.span(T["ai_goes"], class_name="text-slate-400"),
+                rx.el.span(card.aim, data_testid="ai-aim", class_name=_color(card.id, TEXT_COLORS, "font-mono")),
+                class_name="mt-1.5 flex items-center gap-2 text-sm",
+            ),
+        ),
+        rx.cond(
+            card.words != "",
+            rx.el.div("「", card.words, "」", data_testid="ai-words", class_name="mt-2 rounded-xl rounded-tl-sm bg-slate-800/80 px-3 py-1.5 text-sm text-slate-100"),
+        ),
+        rx.cond(card.note != "", rx.el.p(T["ai_failed"], " ", card.note, class_name="mt-1.5 break-words text-xs text-rose-300")),
+        data_testid="ai-card",
+        data_ai=card.id,
+        class_name="border-t border-slate-800 pt-3 first:border-t-0 first:pt-0",
+    )
+
+
 def _said_row(d: Decision) -> rx.Component:
     return rx.el.tr(
         rx.el.td(d.at, class_name="py-1 pr-2 text-right font-mono text-slate-400"),
-        rx.el.td(d.aim, class_name="whitespace-nowrap py-1 pr-2 font-mono text-cyan-200"),
+        rx.el.td(
+            rx.cond(Game.playing_crowd, rx.el.span(d.name, " ", class_name=_color(d.who, TEXT_COLORS, "font-sans"))),
+            d.aim,
+            class_name="whitespace-nowrap py-1 pr-2 font-mono text-slate-200",
+        ),
         rx.el.td(
             d.words,
             class_name=rx.match(d.tone, ("failed", "py-1 pr-2 text-rose-300"), ("odd", "py-1 pr-2 text-amber-200"), "py-1 pr-2 text-slate-300"),
@@ -310,42 +391,17 @@ def _said_row(d: Decision) -> rx.Component:
 
 
 def ai_panel() -> rx.Component:
+    head = "pb-1 pr-2 text-[11px] font-normal text-slate-500 whitespace-nowrap"
     return rx.el.div(
-        rx.el.div(
-            rx.cond(
-                Game.ai_state == "thinking",
-                rx.el.span(class_name="h-2.5 w-2.5 animate-pulse rounded-full bg-cyan-300"),
-                rx.el.span(class_name="h-2.5 w-2.5 rounded-full bg-slate-600"),
-            ),
-            rx.el.span(Game.ai_status, data_testid="ai-status", class_name="text-sm text-slate-200"),
-            class_name="flex items-center gap-2",
-        ),
-        rx.cond(Game.ai_slow, rx.el.p(T["slow_note"], data_testid="slow-note", class_name="mt-2 text-sm leading-relaxed text-amber-200")),
-        rx.cond(
-            Game.ai_aim != "",
-            rx.el.div(
-                rx.el.span(T["ai_goes"], class_name="text-slate-400"),
-                rx.el.span(Game.ai_aim, data_testid="ai-aim", class_name="font-mono text-cyan-200"),
-                class_name="mt-2 flex items-center gap-2 text-sm",
-            ),
-        ),
-        rx.cond(
-            Game.ai_words != "",
-            rx.el.div(
-                rx.el.div(T["ai_says"], class_name="text-xs text-slate-400"),
-                rx.el.div("「", Game.ai_words, "」", data_testid="ai-words", class_name="mt-1 rounded-xl rounded-tl-sm bg-cyan-400/10 px-3 py-2 text-cyan-100"),
-                class_name="mt-3",
-            ),
-        ),
-        rx.cond(Game.ai_note != "", rx.el.p(T["ai_failed"], " ", Game.ai_note, class_name="mt-2 break-words text-sm text-rose-300")),
+        rx.el.div(rx.foreach(Game.ais, ai_card), class_name="space-y-3"),
         rx.el.div(
             rx.el.div(T["log_title"], class_name="mb-1 text-xs uppercase tracking-wider text-slate-400"),
             rx.el.table(
                 rx.el.thead(
                     rx.el.tr(
-                        rx.el.th(T["log_at"], class_name="pb-1 pr-2 text-right text-[11px] font-normal text-slate-500 whitespace-nowrap"),
-                        rx.el.th(T["log_aim"], class_name="pb-1 pr-2 text-left text-[11px] font-normal text-slate-500 whitespace-nowrap"),
-                        rx.el.th(T["log_words"], class_name="pb-1 pr-2 text-left text-[11px] font-normal text-slate-500 whitespace-nowrap"),
+                        rx.el.th(T["log_at"], class_name=f"{head} text-right"),
+                        rx.el.th(T["log_aim"], class_name=f"{head} text-left"),
+                        rx.el.th(T["log_words"], class_name=f"{head} text-left"),
                         rx.el.th(T["log_secs"], class_name="pb-1 text-right text-[11px] font-normal text-slate-500 whitespace-nowrap"),
                     )
                 ),
@@ -360,33 +416,47 @@ def ai_panel() -> rx.Component:
     )
 
 
-def _stat_row(label: rx.Var, mine: rx.Var | int, theirs: rx.Var | int) -> rx.Component:
+def _place_row(p: Place) -> rx.Component:
+    num = "py-1.5 pr-2 text-right font-mono"
     return rx.el.tr(
-        rx.el.td(label, class_name="py-1.5 pr-3 text-slate-400"),
-        rx.el.td(mine, class_name=f"py-1.5 pr-3 text-right font-mono {YOU}"),
-        rx.el.td(theirs, class_name=f"py-1.5 text-right font-mono {AI}"),
+        rx.el.td(p.rank, class_name=num + " text-slate-400"),
+        rx.el.td(
+            rx.el.span(_dot(p.id), p.name, class_name="flex items-center gap-1.5"),
+            class_name=_color(p.id, TEXT_COLORS, "whitespace-nowrap py-1.5 pr-2"),
+        ),
+        rx.el.td(p.score, class_name=_color(p.id, TEXT_COLORS, num + " font-bold")),
+        rx.el.td(p.apples, class_name=num),
+        rx.el.td(p.golds, class_name=num),
+        rx.el.td(p.crashes, class_name=num),
+        rx.el.td(p.asks, class_name=num + " text-slate-400"),
+        rx.el.td(p.secs, class_name="py-1.5 text-right font-mono text-slate-400"),
         class_name="border-t border-slate-800",
     )
 
 
 def result_card() -> rx.Component:
     rep = Game.rep
+    head = "pb-1 pr-2 text-right text-[11px] font-normal text-slate-400 whitespace-nowrap"
     return rx.el.div(
-        rx.el.table(
-            rx.el.thead(
-                rx.el.tr(
-                    rx.el.th("", class_name="pb-1"),
-                    rx.el.th(T["you"], class_name=f"pb-1 pr-3 text-right text-xs font-normal {YOU}"),
-                    rx.el.th(T["ai"], class_name=f"pb-1 text-right text-xs font-normal {AI}"),
-                )
+        rx.el.div(
+            rx.el.table(
+                rx.el.thead(
+                    rx.el.tr(
+                        rx.el.th(T["col_rank"], class_name=head),
+                        rx.el.th(T["col_snake"], class_name="pb-1 pr-2 text-left text-[11px] font-normal text-slate-400"),
+                        rx.el.th(T["col_points"], class_name=head),
+                        rx.el.th(T["col_apples"], class_name=head),
+                        rx.el.th(T["col_golds"], class_name=head),
+                        rx.el.th(T["col_crashes"], class_name=head),
+                        rx.el.th(T["col_asks"], class_name=head),
+                        rx.el.th(T["col_secs"], class_name="pb-1 text-right text-[11px] font-normal text-slate-400 whitespace-nowrap"),
+                    )
+                ),
+                rx.el.tbody(rx.foreach(Game.places, _place_row)),
+                class_name="w-full text-sm",
+                data_testid="places",
             ),
-            rx.el.tbody(
-                _stat_row(T["stat_points"], Game.my_score, Game.ai_score),
-                _stat_row(T["stat_apples"], rep["you_apples"], rep["ai_apples"]),
-                _stat_row(T["stat_golds"], rep["you_golds"], rep["ai_golds"]),
-                _stat_row(T["stat_crashes"], rep["you_crashes"], rep["ai_crashes"]),
-            ),
-            class_name="w-full text-sm",
+            class_name="overflow-x-auto",
         ),
         rx.el.div(T["report_title"], class_name="mb-1 mt-4 text-xs uppercase tracking-wider text-slate-400"),
         rx.el.div(
@@ -395,6 +465,7 @@ def result_card() -> rx.Component:
                 for k in ("asks", "secs", "failed", "bad")
             ],
             class_name="space-y-1 text-sm",
+            data_testid="report",
         ),
         rx.el.div(
             rx.el.button(
@@ -443,7 +514,7 @@ def match_view() -> rx.Component:
         rx.cond(Game.phase == "result", result_card(), ai_panel()),
         # Keys go to the server only during a match (the page's script keeps arrows from scrolling).
         rx.cond(Game.phase != "result", rx.window_event_listener(on_key_down=Game.key)),
-        class_name="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]",
+        class_name="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]",
         data_testid="match",
     )
 

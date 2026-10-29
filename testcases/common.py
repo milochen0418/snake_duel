@@ -94,17 +94,23 @@ WAYS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
 
+def snake(f: dict, sid: str) -> dict:
+    """One snake of a frame, by id ("you", "ai1" …)."""
+    return next(s for s in f["snakes"] if s["id"] == sid)
+
+
 def choose(f: dict) -> str | None:
     """The arrow key that takes the person's snake towards the nearest food without boxing it in
-    (None: keep going)."""
-    you = f["you"]
+    or meeting another head (None: keep going)."""
+    you = snake(f, "you")
     if not you["body"]:
         return None
     head, heading = tuple(you["body"][0]), you["dir"]
-    taken = {tuple(c) for s in (f["you"], f["ai"]) for c in s["body"][:-1]}
-    if f["ai"]["body"]:
-        hx, hy = f["ai"]["body"][0]
-        taken |= {(hx + dx, hy + dy) for dx, dy in WAYS.values()}
+    taken = {tuple(c) for s in f["snakes"] for c in s["body"][:-1]}
+    for other in f["snakes"]:
+        if other["id"] != "you" and other["body"]:
+            hx, hy = other["body"][0]
+            taken |= {(hx + dx, hy + dy) for dx, dy in WAYS.values()}
 
     def free(c: tuple[int, int]) -> bool:
         return 0 <= c[0] < f["w"] and 0 <= c[1] < f["h"] and c not in taken
@@ -139,6 +145,25 @@ def choose(f: dict) -> str | None:
 
 def number(page: Page, test_id: str) -> int:
     return int(page.inner_text(f"[data-testid={test_id}]").strip().replace("−", "-"))
+
+
+def places(page: Page) -> list[dict]:
+    """The result's table: a row per snake, best first."""
+    rows = []
+    for tr in page.locator("[data-testid=places] tbody tr").all():
+        cells = [c.inner_text().strip() for c in tr.locator("td").all()]
+        rank, name, points, apples, golds, crashes = cells[:6]
+        rows.append({"rank": int(rank), "name": name, "points": int(points.replace("−", "-")), "apples": int(apples), "golds": int(golds), "crashes": int(crashes), "asks": cells[6]})
+    return rows
+
+
+def check_places(rows: list[dict]) -> None:
+    """Every snake's points add up, and the places go by points."""
+    for row in rows:
+        assert row["points"] == row["apples"] + 3 * row["golds"] - 3 * row["crashes"], row
+    assert [r["points"] for r in rows] == sorted((r["points"] for r in rows), reverse=True), rows
+    for a, b in zip(rows, rows[1:]):
+        assert (a["rank"] == b["rank"]) == (a["points"] == b["points"]), rows
 
 
 def finish(errors: list[str]) -> None:

@@ -15,9 +15,10 @@ plays don't land on your scoreboard.
 
 | Suite | What it checks |
 |-------|----------------|
-| `smoke_home` | The lobby: the opponent from the AI Hub (or the note that there is none, with Start off for it but on for the practice snake), speed, length and opponent kept in the browser over a reload, the English switch, no sideways scrolling on a phone. |
-| `play_match` | A whole one-minute match at the fast speed against the practice snake (no AI Hub needed): the countdown over the starting board drawn on the canvas, a turn pressed before the start, the person's snake steered with the arrow keys by the bot, the practice snake's aim and decisions, scores that add up (apples + 3 × gold − 3 × crashes) in the result, the scoreboard's row. About 70 s. |
-| `play_ai` | (Needs an AI Hub; skipped without one.) A whole one-minute match at the slow speed against the hub's model: its decisions come in with words and seconds, its snake heads for the food it named, the result counts its decisions, the model's row on the scoreboard. Give it a quick model (a thinking one only dodges, and the suite fails). |
+| `smoke_home` | The lobby: the opponent from the AI Hub (or the note that there is none, with Start off for it but on for the practice snake), the mode (the number of AI snakes only for a free-for-all), speed, length, mode and opponent kept in the browser over a reload, the English switch, no sideways scrolling on a phone. |
+| `play_match` | A whole one-minute duel at the fast speed against the practice snake (no AI Hub needed): the countdown over the starting board drawn on the canvas, a turn pressed before the start, the person's snake steered with the arrow keys by the bot, the practice snake's aim and decisions, places with points that add up (apples + 3 × gold − 3 × crashes), the final word, the scoreboard's row. About 70 s. |
+| `play_crowd` | A whole one-minute free-for-all at the fast speed against three practice snakes on the 30×20 board: four named snakes, a card and a score per AI snake, each of them heading somewhere of its own and listed by name in the decisions, four places that add up, the person's place in the final word, the scoreboard's free-for-all row. About 70 s. |
+| `play_ai` | (Needs an AI Hub; skipped without one.) A whole one-minute duel at the slow speed against the hub's model: its decisions come in with words and seconds, its snake heads for the food it named, the result counts its decisions, the model's row on the scoreboard. Give it a quick model (a thinking one only dodges, and the suite fails). |
 
 ## Running
 
@@ -26,6 +27,7 @@ Use the repo-level runner (it starts and stops the Reflex server and collects ar
 ```bash
 poetry run ./run_test_suite.sh smoke_home
 poetry run ./run_test_suite.sh play_match
+poetry run ./run_test_suite.sh play_crowd
 DDNS_AI_HUB_URL=http://127.0.0.1:8182 DDNS_AUTH_SECRET=<the hub's secret> SERVICE_SUBDOMAIN=snake-duel \
   poetry run ./run_test_suite.sh play_ai
 ```

@@ -1,35 +1,51 @@
 import random
 
+import pytest
+
 from snake_duel import engine
 from snake_duel.engine import Food, Snake, World
 
 
-def world(you: list, ai: list, you_heading: str = "right", ai_heading: str = "left", foods: list | None = None, tick_ms: int = 100) -> World:
-    """A world with the snakes and food just as given (nothing placed at random)."""
-    w = World(tick_ms=tick_ms, end=10_000, snakes={"you": Snake(body=you, heading=you_heading), "ai": Snake(body=ai, heading=ai_heading)}, rng=random.Random(0))
+def world(you: list, ai: list, you_heading: str = "right", ai_heading: str = "left", foods: list | None = None, tick_ms: int = 100, apples: int = 0, more: dict | None = None) -> World:
+    """A world with the snakes and food just as given (nothing placed at random unless
+    ``apples`` asks for it); ``more`` adds snakes by id."""
+    snakes = {"you": Snake(body=you, heading=you_heading), "ai": Snake(body=ai, heading=ai_heading), **(more or {})}
+    w = World(tick_ms=tick_ms, end=10_000, snakes=snakes, apples=apples, rng=random.Random(0))
     w.foods = foods or []
     w.next_gold = 10**9
     return w
 
 
-def no_apples(monkeypatch) -> None:
-    monkeypatch.setattr(engine, "APPLES", 0)
-
-
 def test_new_world_is_fair():
-    w = engine.new_world(160, 60, seed=1)
+    w = engine.new_world(["you", "ai"], 160, 60, seed=1)
     you, ai = w.snakes["you"], w.snakes["ai"]
+    assert (w.w, w.h) == engine.DUEL
     assert len(you.body) == len(ai.body) == engine.START_LEN
     assert ai.head == (w.w - 1 - you.head[0], w.h - 1 - you.head[1])
-    assert len(w.foods) == engine.APPLES
-    assert len({f.label for f in w.foods}) == engine.APPLES
+    assert len(w.foods) == w.apples == 3
+    assert len({f.label for f in w.foods}) == 3
     for f in w.foods:
         assert engine._steps(you.head, f.cell) == engine._steps(ai.head, f.cell)
     assert w.end == round(60 * 1000 / 160)
 
 
-def test_moving_and_turning(monkeypatch):
-    no_apples(monkeypatch)
+@pytest.mark.parametrize("n", [3, 4, 5])
+def test_a_crowd_starts_round_the_middle(n):
+    ids = ["you", *[f"ai{i}" for i in range(1, n)]]
+    w = engine.new_world(ids, 160, 60, seed=n)
+    assert (w.w, w.h) == engine.CROWD and list(w.snakes) == ids
+    cells = [c for s in w.snakes.values() for c in s.body]
+    assert len(cells) == len(set(cells)) == n * engine.START_LEN
+    assert all(w.inside(c) for c in cells)
+    for s in w.snakes.values():
+        first = engine.ahead(s.head, s.heading)
+        assert w.inside(first) and first not in cells  # nobody starts against a wall or a body
+    assert len(w.foods) == w.apples == n + 1
+    with pytest.raises(ValueError):
+        engine.new_world(["you"], 160, 60)
+
+
+def test_moving_and_turning():
     w = world([(5, 5), (4, 5), (3, 5)], [(15, 10), (16, 10), (17, 10)])
     engine.step(w, {})
     assert w.snakes["you"].body == [(6, 5), (5, 5), (4, 5)]
@@ -40,8 +56,7 @@ def test_moving_and_turning(monkeypatch):
     assert w.snakes["ai"].head == (13, 9)
 
 
-def test_eating_grows_and_scores(monkeypatch):
-    no_apples(monkeypatch)
+def test_eating_grows_and_scores():
     w = world([(5, 5), (4, 5), (3, 5)], [(15, 10), (16, 10), (17, 10)], foods=[Food("A", (6, 5), "apple"), Food("B", (14, 10), "gold")])
     events = engine.step(w, {})
     you, ai = w.snakes["you"], w.snakes["ai"]
@@ -52,14 +67,13 @@ def test_eating_grows_and_scores(monkeypatch):
 
 
 def test_apples_are_put_back():
-    w = world([(5, 5), (4, 5), (3, 5)], [(15, 10), (16, 10), (17, 10)], foods=[Food("A", (6, 5), "apple")])
+    w = world([(5, 5), (4, 5), (3, 5)], [(15, 10), (16, 10), (17, 10)], foods=[Food("A", (6, 5), "apple")], apples=3)
     engine.step(w, {})
-    assert sum(1 for f in w.foods if f.kind == "apple") == engine.APPLES
+    assert sum(1 for f in w.foods if f.kind == "apple") == 3
     assert all(engine._steps(w.snakes["you"].head, f.cell) >= engine.NEAR for f in w.foods)
 
 
-def test_wall_crash_costs_points_and_comes_back(monkeypatch):
-    no_apples(monkeypatch)
+def test_wall_crash_costs_points_and_comes_back():
     w = world([(23, 5), (22, 5), (21, 5)], [(5, 10), (6, 10), (7, 10)])
     events = engine.step(w, {})
     you = w.snakes["you"]
@@ -76,48 +90,55 @@ def test_wall_crash_costs_points_and_comes_back(monkeypatch):
     assert len(you.body) == engine.START_LEN
 
 
-def test_crash_into_self(monkeypatch):
-    no_apples(monkeypatch)
+def test_comes_back_far_from_every_head():
+    w = world([(0, 0)], [(2, 2), (2, 3)], more={"ai2": Snake(body=[(20, 2), (20, 3)], heading="up"), "ai3": Snake(body=[(3, 13), (3, 14)], heading="up")})
+    w.snakes["you"].body, w.snakes["you"].back_at = [], 0
+    assert engine._come_back(w, "you")
+    head = w.snakes["you"].head
+    nearest = min(engine._steps(head, s.head) for k, s in w.snakes.items() if k != "you")
+    assert nearest >= 10, (head, nearest)
+
+
+def test_crash_into_self():
     w = world([(5, 5), (5, 6), (4, 6), (4, 5), (4, 4)], [(15, 10), (16, 10), (17, 10)], you_heading="up")
     events = engine.step(w, {"you": "left"})
     assert events[0]["how"] == "self" and not w.snakes["you"].alive
 
 
-def test_following_a_tail_is_safe(monkeypatch):
-    no_apples(monkeypatch)
+def test_following_a_tail_is_safe():
     # The person's head moves into the cell the AI's tail leaves this very tick.
-    w = world([(9, 5), (8, 5)], [(10, 4), (10, 5), (11, 5)], ai_heading="up")
-    w.snakes["ai"].body = [(10, 4), (10, 5)]
-    w.snakes["you"].heading = "right"
+    w = world([(9, 5), (8, 5)], [(10, 4), (10, 5)], ai_heading="up")
     engine.step(w, {})
     assert w.snakes["you"].alive and w.snakes["you"].head == (10, 5)
 
 
-def test_heads_meeting_crash_both(monkeypatch):
-    no_apples(monkeypatch)
+def test_heads_meeting_crash_both():
     w = world([(5, 5), (4, 5), (3, 5)], [(7, 5), (8, 5), (9, 5)])
     events = engine.step(w, {})
     assert {e["who"]: e["how"] for e in events} == {"you": "head", "ai": "head"}
     assert w.snakes["you"].score == w.snakes["ai"].score == -engine.CRASH_POINTS
 
 
-def test_heads_swapping_crash_both(monkeypatch):
-    no_apples(monkeypatch)
+def test_three_heads_meeting_crash_all():
+    w = world([(5, 5), (4, 5)], [(7, 5), (8, 5)], more={"ai2": Snake(body=[(6, 6), (6, 7)], heading="up")})
+    events = engine.step(w, {})
+    assert {e["who"]: e["how"] for e in events} == {"you": "head", "ai": "head", "ai2": "head"}
+
+
+def test_heads_swapping_crash_both():
     w = world([(5, 5), (4, 5), (3, 5)], [(6, 5), (7, 5), (8, 5)])
     engine.step(w, {})
     assert not w.snakes["you"].alive and not w.snakes["ai"].alive
 
 
-def test_running_into_the_other_body(monkeypatch):
-    no_apples(monkeypatch)
+def test_running_into_the_other_body():
     w = world([(5, 4), (4, 4), (3, 4)], [(8, 5), (7, 5), (6, 5), (5, 5), (4, 5)], you_heading="right", ai_heading="right")
     events = engine.step(w, {"you": "down"})
     assert events[0]["who"] == "you" and events[0]["how"] == "body"
     assert w.snakes["ai"].alive
 
 
-def test_gold_comes_and_goes(monkeypatch):
-    no_apples(monkeypatch)
+def test_gold_comes_and_goes():
     w = world([(5, 5), (4, 5), (3, 5)], [(15, 10), (16, 10), (17, 10)], tick_ms=500)
     w.next_gold = 2
     engine.step(w, {})
@@ -187,6 +208,12 @@ def test_pilot_stays_off_the_cell_next_to_the_other_head():
     assert turn in ("up", "down")
 
 
+def test_pilot_keeps_off_every_other_head():
+    # Up may meet another AI's head, left the person's: only down is calm.
+    w = world([(10, 4), (9, 4)], [(12, 4), (13, 4), (14, 4)], more={"ai2": Snake(body=[(12, 2), (12, 1)], heading="down")})
+    assert engine.pilot(w, "ai", None)[0] == "down"
+
+
 def corridor(ai_len: int) -> World:
     """The top row from x=0 to 10 is a dead end, closed by the person's (growing) body along
     y=1; the AI's head is at its mouth, the food inside."""
@@ -213,15 +240,28 @@ def test_greedy_goes_for_food_it_gets_to_first():
     assert engine.greedy(w, "you") == ["A"]
 
 
+def test_greedy_counts_every_other_snake():
+    # B is nearer the AI than the person, but a third snake gets there first: A is the AI's.
+    w = world([(2, 2), (1, 2)], [(20, 10), (21, 10)], foods=[Food("A", (20, 4), "apple"), Food("B", (16, 10), "apple")], more={"ai2": Snake(body=[(16, 12), (16, 13)], heading="up")})
+    assert engine.greedy(w, "ai") == ["A"]
+
+
 def test_greedy_skips_gold_it_cannot_reach_in_time():
     w = world([(2, 2), (1, 2)], [(20, 10), (21, 10)], foods=[Food("G", (5, 10), "gold", until=3), Food("B", (16, 2), "apple")])
     assert engine.greedy(w, "ai") == ["B"]
 
 
+def test_grid_marks_each_snake():
+    w = world([(1, 0), (0, 0)], [(3, 0), (4, 0)], foods=[Food("A", (6, 0), "apple")], more={"ai2": Snake(body=[(8, 0), (9, 0)], heading="left")})
+    assert engine.grid(w, "ai", {"you": "0", "ai2": "2"})[0][:10] == "o0.Yy.A.2o"
+
+
 def test_frame_has_what_the_page_draws():
-    w = engine.new_world(160, 60, seed=3)
-    f = engine.frame(w, (3, 4), [(17, 11), (16, 11)], [{"kind": "eat", "cell": (1, 2), "who": "you", "food": "apple", "points": 1}])
-    assert f["you"]["body"][0] == [6, 4] and f["ai"]["dir"] == "left"
-    assert f["aim"] == [3, 4] and f["way"] == [[16, 11]]
-    assert f["fx"][0]["cell"] == [1, 2]
-    assert len(f["food"]) == engine.APPLES
+    w = engine.new_world(["you", "ai1", "ai2"], 160, 60, seed=3)
+    names = {"you": "你", "ai1": "AI 1", "ai2": "AI 2"}
+    f = engine.frame(w, names, {"ai1": ((3, 4), [(19, 4), (20, 4)]), "ai2": (None, [])}, [{"kind": "eat", "cell": (1, 2), "who": "you", "food": "apple", "points": 1}])
+    assert [s["id"] for s in f["snakes"]] == ["you", "ai1", "ai2"] and f["snakes"][1]["n"] == "AI 1"
+    assert f["snakes"][0]["body"][0] == [5, 10] and f["snakes"][1]["dir"] == "right"
+    assert f["aims"] == [{"id": "ai1", "aim": [3, 4], "way": [[20, 4]]}]
+    assert f["fx"][0]["cell"] == [1, 2] and (f["w"], f["h"]) == engine.CROWD
+    assert len(f["food"]) == 4

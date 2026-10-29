@@ -1,32 +1,36 @@
-"""The rules of the arena: two snakes on one board after the same food, moving at the same moment.
+"""The rules of the arena: snakes on one board after the same food, all moving at the same moment.
 
-Pure Python, no Reflex. :class:`World` is a whole match; :func:`step` moves it on by one tick,
-with each side's turn, and says what happened (who ate what, who crashed, who came back).
+Pure Python, no Reflex. :class:`World` is a whole match, two snakes (a duel) or up to five (a
+free-for-all); :func:`step` moves it on by one tick with each snake's turn, and says what
+happened (who ate what, who crashed, who came back).
 
-The AI's snake has a "body", :func:`pilot`: told where the AI wants to go, it takes the shortest
-safe way there, steering clear of walls, bodies and the other head; told nothing, it only dodges
+An AI snake has a "body", :func:`pilot`: told where its AI wants to go, it takes the shortest
+safe way there, steering clear of walls, bodies and the other heads; told nothing, it only dodges
 and never goes after food by itself. Where to go is the AI's choice (:mod:`snake_duel.brain`).
 
-The board is ``W × H`` cells; ``(0, 0)`` is the top left, x grows to the right, y downwards.
+Snakes are known by an id (``you`` for the person, ``ai1``, ``ai2`` … for the AI snakes). The
+board is ``w × h`` cells (:func:`board_size`); ``(0, 0)`` is the top left, x grows to the right,
+y downwards.
 """
 
 from __future__ import annotations
 
 import collections
 import dataclasses
+import math
 import random
 import string
 from typing import Any
 
 Cell = tuple[int, int]
 
-W, H = 24, 16
+DUEL = (24, 16)  # the board for two snakes
+CROWD = (30, 20)  # the board for three to five
+MAX_SNAKES = 5
 DIRS: dict[str, Cell] = {"up": (0, -1), "right": (1, 0), "down": (0, 1), "left": (-1, 0)}
 OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
-SIDES = ("you", "ai")
 
 START_LEN = 4
-APPLES = 3  # apples on the board at all times
 APPLE_POINTS = 1
 GOLD_POINTS = 3
 CRASH_POINTS = 3  # lost on a crash
@@ -34,7 +38,11 @@ OUT_SECONDS = 2.0  # off the board after a crash
 FIRST_GOLD_SECONDS = 10.0
 GOLD_EVERY_SECONDS = 12.0  # after the last one was eaten or vanished
 GOLD_LASTS_SECONDS = 8.0
-NEAR = 3  # new food lands at least this many steps from either head
+NEAR = 3  # new food lands at least this many steps from every head
+
+
+def board_size(snakes: int) -> tuple[int, int]:
+    return DUEL if snakes <= 2 else CROWD
 
 
 @dataclasses.dataclass
@@ -78,9 +86,10 @@ class World:
     tick: int = 0
     next_gold: int = 0
     labels: int = 0  # where the next label is looked for
+    apples: int = 3  # apples on the board at all times
     rng: random.Random = dataclasses.field(default_factory=random.Random)
-    w: int = W
-    h: int = H
+    w: int = DUEL[0]
+    h: int = DUEL[1]
 
     def ticks(self, seconds: float) -> int:
         return max(1, round(seconds * 1000 / self.tick_ms))
@@ -103,8 +112,8 @@ class World:
     def food(self, label: str) -> Food | None:
         return next((f for f in self.foods if f.label == label), None)
 
-    def other(self, who: str) -> Snake:
-        return self.snakes["ai" if who == "you" else "you"]
+    def others(self, who: str) -> dict[str, Snake]:
+        return {k: s for k, s in self.snakes.items() if k != who}
 
 
 def ahead(cell: Cell, way: str) -> Cell:
@@ -117,25 +126,53 @@ def way_to(a: Cell, b: Cell) -> str:
     return next(d for d, (dx, dy) in DIRS.items() if (a[0] + dx, a[1] + dy) == b)
 
 
-def new_world(tick_ms: int, seconds: int, seed: int | None = None) -> World:
-    """Both snakes at their starting places, facing each other across the board (the AI's place
-    is the person's turned half way round), and the first apples, as near to one as the other."""
-    you = Snake(body=[(6 - i, 4) for i in range(START_LEN)], heading="right")
-    ai = Snake(body=[(W - 1 - x, H - 1 - y) for x, y in you.body], heading="left")
-    world = World(tick_ms=tick_ms, end=0, snakes={"you": you, "ai": ai}, rng=random.Random(seed))
+def new_world(ids: list[str], tick_ms: int, seconds: int, seed: int | None = None) -> World:
+    """The snakes at their starting places, and the first apples (one more than there are
+    snakes), as near to one head as to the others as the board allows."""
+    if not 2 <= len(ids) <= MAX_SNAKES:
+        raise ValueError(f"2 to {MAX_SNAKES} snakes, not {len(ids)}")
+    w, h = board_size(len(ids))
+    snakes = {}
+    for who, (head, way) in zip(ids, _starts(len(ids), w, h)):
+        dx, dy = DIRS[way]
+        snakes[who] = Snake(body=[(head[0] - dx * i, head[1] - dy * i) for i in range(START_LEN)], heading=way)
+    world = World(tick_ms=tick_ms, end=0, snakes=snakes, apples=len(ids) + 1, rng=random.Random(seed), w=w, h=h)
     world.end = world.ticks(seconds)
     world.next_gold = world.ticks(FIRST_GOLD_SECONDS)
-    fair = [c for c in _free(world) if _far(world, c) and _steps(you.head, c) == _steps(ai.head, c)]
-    for cell in world.rng.sample(fair, APPLES):
+    heads = [s.head for s in snakes.values()]
+    cells = [c for c in _free(world) if _far(world, c)]
+    spread = {c: max(_steps(hd, c) for hd in heads) - min(_steps(hd, c) for hd in heads) for c in cells}
+    fair = sorted(cells, key=lambda c: spread[c])
+    least = spread[fair[0]]
+    fair = [c for c in fair if spread[c] <= least + (0 if len(ids) == 2 else 2)] or fair
+    for cell in world.rng.sample(fair, min(world.apples, len(fair))):
         world.foods.append(Food(_label(world), cell, "apple"))
     return world
+
+
+def _starts(n: int, w: int, h: int) -> list[tuple[Cell, str]]:
+    """Where each snake's head starts, and its way. Two face each other across the board (the
+    second's place is the first's turned half way round); three to five start evenly round the
+    middle, all going the same way round, so none runs into another at once."""
+    if n == 2:
+        first = (6, 4)
+        return [(first, "right"), ((w - 1 - first[0], h - 1 - first[1]), "left")]
+    cx, cy = (w - 1) / 2, (h - 1) / 2
+    out = []
+    for k in range(n):
+        a = math.pi + 2 * math.pi * k / n  # the first one (the person) on the left
+        x, y = round(cx + w * 0.32 * math.cos(a)), round(cy + h * 0.3 * math.sin(a))
+        tx, ty = -math.sin(a), math.cos(a)  # clockwise on the screen
+        way = ("right" if tx > 0 else "left") if abs(tx) >= abs(ty) else ("down" if ty > 0 else "up")
+        out.append(((x, y), way))
+    return out
 
 
 # ------------------------------------------------------------ a tick
 
 
 def step(world: World, turns: dict[str, str | None]) -> list[dict[str, Any]]:
-    """Moves the world on by one tick: each snake turns (or not) and both move at once; then
+    """Moves the world on by one tick: each snake turns (or not) and all move at once; then
     crashes, food and comebacks are settled. Returns what happened, for the page's effects."""
     world.tick += 1
     events: list[dict[str, Any]] = []
@@ -147,7 +184,7 @@ def step(world: World, turns: dict[str, str | None]) -> list[dict[str, Any]]:
             snake.heading = turn
         heads[who] = ahead(snake.head, snake.heading)
     food_at = {f.cell: f for f in world.foods}
-    # Where each body will be once both have moved: a tail moves on unless the snake grows.
+    # Where each body will be once all have moved: a tail moves on unless the snake grows.
     bodies = {}
     for who, snake in moving.items():
         keeps_tail = snake.grow > 0 or heads[who] in food_at
@@ -167,7 +204,8 @@ def step(world: World, turns: dict[str, str | None]) -> list[dict[str, Any]]:
                 swapped = head == theirs.head and heads[other] == snake.head
                 if head == heads[other] or swapped:
                     crashed[who] = "head"
-                elif head in bodies[other]:
+                    break
+                if head in bodies[other]:
                     crashed[who] = "body"
 
     for who, snake in moving.items():
@@ -204,15 +242,15 @@ def step(world: World, turns: dict[str, str | None]) -> list[dict[str, Any]]:
     if not any(f.kind == "gold" for f in world.foods) and world.tick >= world.next_gold:
         if gold := _place(world, "gold"):
             events.append({"kind": "gold", "label": gold.label, "cell": gold.cell})
-    while sum(1 for f in world.foods if f.kind == "apple") < APPLES and _place(world, "apple"):
+    while sum(1 for f in world.foods if f.kind == "apple") < world.apples and _place(world, "apple"):
         pass
     return events
 
 
 def _come_back(world: World, who: str) -> bool:
     """Puts a crashed snake back as one cell that grows out to its starting length, where it has
-    room ahead and is far from the other head."""
-    other = world.other(who)
+    room ahead and is far from the other heads."""
+    heads = [s.head for s in world.others(who).values() if s.alive]
     taken = _taken(world)
     best: list[tuple[int, Cell, str]] = []
     for cell in _free(world):
@@ -221,8 +259,7 @@ def _come_back(world: World, who: str) -> bool:
             for _ in range(3):
                 run.append(ahead(run[-1], way))
             if all(world.inside(c) and c not in taken for c in run):
-                far = _steps(cell, other.head) if other.alive else 99
-                best.append((far, cell, way))
+                best.append((min((_steps(cell, hd) for hd in heads), default=99), cell, way))
     if not best:
         return False
     best.sort(reverse=True)
@@ -235,10 +272,15 @@ def _come_back(world: World, who: str) -> bool:
 def _place(world: World, kind: str) -> Food | None:
     cells = [c for c in _free(world) if _far(world, c)]
     if kind == "gold":
-        # a race: about as far from one head as from the other
+        # a race: the two nearest heads about as far from it
         heads = [s.head for s in world.snakes.values() if s.alive]
-        fair = [c for c in cells if len(heads) < 2 or abs(_steps(heads[0], c) - _steps(heads[1], c)) <= 4]
-        cells = fair or cells
+        if len(heads) >= 2:
+
+            def gap(cell: Cell) -> int:
+                near = sorted(_steps(hd, cell) for hd in heads)
+                return near[1] - near[0]
+
+            cells = [c for c in cells if gap(c) <= 4] or cells
     if not cells:
         return None
     food = Food(_label(world), world.rng.choice(cells), kind)
@@ -282,7 +324,7 @@ def _steps(a: Cell, b: Cell) -> int:
 
 def blocked(world: World, who: str = "") -> set[Cell]:
     """The cells bodies may hold on the next tick, as ``who`` sees them: its own tail moves on
-    and leaves its cell free (unless it grows); the other's tail may not (it may eat)."""
+    and leaves its cell free (unless it grows); the others' tails may not (they may eat)."""
     cells: set[Cell] = set()
     for side, snake in world.snakes.items():
         if snake.alive:
@@ -340,17 +382,16 @@ def distance(world: World, who: str, cell: Cell) -> int | None:
 
 
 def pilot(world: World, who: str, goal: Cell | None) -> tuple[str, list[Cell]]:
-    """The AI snake's body: the way it turns next, and the way it means to take to ``goal``.
+    """An AI snake's body: the way it turns next, and the way it means to take to ``goal``.
 
     It goes the shortest safe way, unless that step would leave it less room than it needs or
-    could meet the other head; with no goal, or no way to it, it turns where there is the most
+    could meet another head; with no goal, or no way to it, it turns where there is the most
     room (straight on when that is as good)."""
     snake = world.snakes[who]
     if not snake.alive:
         return snake.heading, []
     walls = blocked(world, who)
-    other = world.other(who)
-    danger = {ahead(other.head, w) for w in DIRS} if other.alive else set()
+    danger = {ahead(s.head, w) for s in world.others(who).values() if s.alive for w in DIRS}
     options = [w for w in DIRS if w != OPPOSITE[snake.heading] and world.inside(ahead(snake.head, w)) and ahead(snake.head, w) not in walls]
     if not options:
         return snake.heading, []
@@ -372,16 +413,15 @@ def pilot(world: World, who: str, goal: Cell | None) -> tuple[str, list[Cell]]:
 
 def greedy(world: World, who: str) -> list[str]:
     """The practice snake's whole mind: the food it gets to first for the fewest steps per point."""
-    other = "ai" if who == "you" else "you"
     best: list[tuple[int, float, str]] = []
     for food in world.foods:
         mine = distance(world, who, food.cell)
         if mine is None:
             continue
-        theirs = distance(world, other, food.cell)
-        first = theirs is None or mine <= theirs
         if food.until and world.tick + mine > food.until:
             continue  # gone before it could get there
+        theirs = [d for d in (distance(world, other, food.cell) for other in world.others(who)) if d is not None]
+        first = not theirs or mine <= min(theirs)
         best.append((0 if first else 1, mine / food.points, food.label))
     best.sort()
     return [label for _, _, label in best[:1]]
@@ -390,38 +430,37 @@ def greedy(world: World, who: str) -> list[str]:
 # ------------------------------------------------------------ for the page and the AI
 
 
-def grid(world: World, me: str) -> list[str]:
+def grid(world: World, me: str, marks: dict[str, str]) -> list[str]:
     """The board as rows of characters from ``me``'s side: ``Y``/``y`` its own head and body,
-    ``O``/``o`` the other's, food by label, ``.`` free."""
+    the others' heads by their ``marks`` and their bodies ``o``, food by label, ``.`` free."""
     rows = [["."] * world.w for _ in range(world.h)]
     for who, snake in world.snakes.items():
         mine = who == me
         for i, (x, y) in enumerate(snake.body):
-            rows[y][x] = ("Y" if mine else "O") if i == 0 else ("y" if mine else "o")
+            rows[y][x] = ("Y" if mine else marks.get(who, "O")) if i == 0 else ("y" if mine else "o")
     for food in world.foods:
         rows[food.cell[1]][food.cell[0]] = food.label
     return ["".join(r) for r in rows]
 
 
-def frame(world: World, aim: Cell | None, way: list[Cell], events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Everything the page's arena draws for one tick."""
+def frame(world: World, names: dict[str, str], aims: dict[str, tuple[Cell | None, list[Cell]]], events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Everything the page's arena draws for one tick: each snake (by id, with its name), the
+    food, where each AI snake is heading and the way it means to take, and what just happened."""
 
-    def side(snake: Snake) -> dict[str, Any]:
-        out = max(0.0, world.seconds(snake.back_at - world.tick)) if not snake.alive else 0.0
-        return {"body": [list(c) for c in snake.body], "dir": snake.heading, "out": round(out, 1)}
+    def snake(who: str, s: Snake) -> dict[str, Any]:
+        out = max(0.0, world.seconds(s.back_at - world.tick)) if not s.alive else 0.0
+        return {"id": who, "n": names.get(who, who), "body": [list(c) for c in s.body], "dir": s.heading, "out": round(out, 1)}
 
     return {
         "w": world.w,
         "h": world.h,
         "t": world.tick,
         "ms": world.tick_ms,
-        "you": side(world.snakes["you"]),
-        "ai": side(world.snakes["ai"]),
+        "snakes": [snake(who, s) for who, s in world.snakes.items()],
         "food": [
             {"l": f.label, "x": f.cell[0], "y": f.cell[1], "k": f.kind, "ttl": round(world.seconds(f.until - world.tick), 1) if f.until else 0}
             for f in world.foods
         ],
-        "aim": list(aim) if aim else None,
-        "way": [list(c) for c in way[1:]],
+        "aims": [{"id": who, "aim": list(aim), "way": [list(c) for c in way[1:]]} for who, (aim, way) in aims.items() if aim],
         "fx": [{**e, "cell": list(e["cell"])} for e in events if "cell" in e],
     }

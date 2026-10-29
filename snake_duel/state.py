@@ -1,15 +1,16 @@
-"""A duel, per browser tab: the lobby, the countdown, the match and the result.
+"""A duel or a free-for-all, per browser tab: the lobby, the countdown, the match and the result.
 
 A match is one background task (``Game.run_match``) that owns a :class:`match.Match`: every tick
-it moves both snakes (the person's turns from ``_turns``, the AI's from its plan), puts the arena
-on the page as JSON for the canvas (``frame``), and starts an ask whenever the match says so,
-without waiting for it. Leaving, a new match or a tab that has gone away for good bump or end
-``_seq``, and the task stops (cancelling the ask, which stops the model).
+it moves all snakes (the person's turns from ``_turns``, each AI snake's from its plan), puts the
+arena on the page as JSON for the canvas (``frame``), and starts an ask for each AI snake whenever
+the match says so, without waiting for it. Leaving, a new match or a tab that has gone away for
+good bump or end ``_seq``, and the task stops (cancelling the asks, which stops the model).
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import math
 import time
@@ -20,13 +21,13 @@ from reflex_ddns_auth import ai
 
 from snake_duel import brain, history
 from snake_duel.i18n import TEXT
-from snake_duel.match import LENGTHS, PRACTICE_SECS, SLOW, SPEEDS, Asked, Decision, Match
+from snake_duel.match import CROWDS, LENGTHS, PRACTICE_SECS, SLOW, SPEEDS, Asked, Decision, Match, Seat
 
 COUNTDOWN = 3
 ASK_TIMEOUT = 60.0  # an answer this late is about a board long gone
 WARMUP_TIMEOUT = 90.0
 STALE = 6.0  # seconds without the tab before a match is called off
-LOG_ROWS = 5
+LOG_ROWS = 6
 KEYS = {
     "ArrowUp": "up",
     "ArrowDown": "down",
@@ -78,11 +79,43 @@ def _watching(token: str) -> bool:
         return True
 
 
+@dataclasses.dataclass
+class AiCard:
+    """An AI snake as the page shows it during a match."""
+
+    id: str
+    name: str
+    score: int = 0
+    state: str = ""  # thinking, plan, idle or out
+    status: str = ""  # the state in words, with the seconds it has been thinking
+    slow: bool = False  # it has been thinking long enough to say why
+    aim: str = ""
+    words: str = ""
+    note: str = ""
+
+
+@dataclasses.dataclass
+class Place:
+    """A snake's line in the result."""
+
+    rank: int
+    id: str
+    name: str
+    score: int
+    apples: int
+    golds: int
+    crashes: int
+    asks: str  # "" for the person
+    secs: str
+
+
 class Game(rx.State):
     lang: str = rx.LocalStorage("", name="snake_duel_lang")
     speed: str = rx.LocalStorage("normal", name="snake_duel_speed")
     length: str = rx.LocalStorage("60", name="snake_duel_length")
     foe: str = rx.LocalStorage("hub", name="snake_duel_foe")  # hub or practice
+    mode: str = rx.LocalStorage("duel", name="snake_duel_mode")  # duel or crowd
+    crowd: str = rx.LocalStorage("3", name="snake_duel_crowd")  # AI snakes in a free-for-all
 
     # the lobby
     hub_state: str = "asking"  # asking, ok, none (no hub) or error
@@ -93,21 +126,20 @@ class Game(rx.State):
 
     # the match
     phase: str = "lobby"  # lobby, warmup, countdown, play or result
+    playing_crowd: bool = False  # this match is a free-for-all
     frame: str = ""  # the arena, as JSON for the canvas
     count: int = 0
     left: int = 0
     my_score: int = 0
-    ai_score: int = 0
     my_out: str = ""  # seconds until the person's snake is back, after a crash
     model: str = ""
-    ai_state: str = ""  # thinking, plan, idle or out
-    ai_think: int = 0  # seconds the ask that is out has taken
-    ai_aim: str = ""
-    ai_words: str = ""
-    ai_note: str = ""
+    ais: list[AiCard] = []
     said: list[Decision] = []
 
     # the result
+    places: list[Place] = []
+    outcome: str = ""
+    outcome_tone: str = ""  # you, ai or draw
     rep: dict[str, str] = {}
 
     _seq: int = 0  # a new number for every match: an older task sees it and stops
@@ -129,21 +161,6 @@ class Game(rx.State):
         return self.t["practice"] if self.foe == "practice" else (self.model or self.opponent)
 
     @rx.var
-    def ai_status(self) -> str:
-        t = self.t
-        if self.ai_state == "thinking":
-            return f"{t['ai_thinking']} {self.ai_think} {t['sec']}" if self.ai_think else t["ai_thinking"]
-        return t.get(f"ai_{self.ai_state}", "")
-
-    @rx.var
-    def ai_slow(self) -> bool:
-        return self.ai_state == "thinking" and self.ai_think >= SLOW
-
-    @rx.var
-    def winner(self) -> str:
-        return "you" if self.my_score > self.ai_score else "ai" if self.ai_score > self.my_score else "draw"
-
-    @rx.var
     def hub_page(self) -> str:
         """The AI Hub's page, next to this app on the same domain ("" when run on its own)."""
         parts = urlsplit(self.router.headers.origin or "")
@@ -162,6 +179,10 @@ class Game(rx.State):
             self.speed = "normal"
         if self.length not in LENGTHS:
             self.length = "60"
+        if self.mode not in ("duel", "crowd"):
+            self.mode = "duel"
+        if self.crowd not in CROWDS:
+            self.crowd = "3"
         # A restart of the server (a hot reload) ends the task that ran the match.
         if self.phase in ("warmup", "countdown", "play") and time.time() - self._beat > STALE:
             self._seq += 1
@@ -171,7 +192,8 @@ class Game(rx.State):
             return Game.check_opponent
 
     def _load_board(self) -> None:
-        self.board = history.board(history.load(), TEXT.get(self.lang, TEXT["zh"])["practice"])
+        t = TEXT.get(self.lang, TEXT["zh"])
+        self.board = history.board(history.load(), {"practice": t["practice"], "mode_duel": t["mode_duel_short"], "mode_crowd": t["mode_crowd_short"]})
 
     @rx.event
     def switch_lang(self):
@@ -192,6 +214,16 @@ class Game(rx.State):
     def set_foe(self, foe: str):
         if foe in ("hub", "practice"):
             self.foe = foe
+
+    @rx.event
+    def set_mode(self, mode: str):
+        if mode in ("duel", "crowd"):
+            self.mode = mode
+
+    @rx.event
+    def set_crowd(self, crowd: str):
+        if crowd in CROWDS:
+            self.crowd = crowd
 
     @rx.event(background=True)
     async def check_opponent(self):
@@ -214,12 +246,14 @@ class Game(rx.State):
     def start(self):
         if self.phase not in ("lobby", "result") or not self.can_start:
             return
+        ais = int(self.crowd) if self.mode == "crowd" else 1
         self._seq += 1
         self._turns, self._beat = [], time.time()
-        self.count, self.left, self.my_score, self.ai_score, self.my_out = COUNTDOWN, int(self.length), 0, 0, ""
+        self.count, self.left, self.my_score, self.my_out = COUNTDOWN, int(self.length), 0, ""
         self.model = self.opponent if self.foe == "hub" else ""
-        self.ai_state, self.ai_think, self.ai_aim, self.ai_words, self.ai_note = "", 0, "", "", ""
-        self.said, self.rep = [], {}
+        self.playing_crowd = ais > 1
+        self.ais = [AiCard(id=f"ai{i}", name=brain.ai_name(f"ai{i}", ais)) for i in range(1, ais + 1)]
+        self.said, self.places, self.rep, self.outcome, self.outcome_tone = [], [], {}, "", ""
         self.phase = "warmup" if self.foe == "hub" and self.opponent_local else "countdown"
         return Game.run_match
 
@@ -244,8 +278,8 @@ class Game(rx.State):
             if self.phase not in ("warmup", "countdown"):
                 return
             seq, token = self._seq, self.router.session.client_token
-            game = Match(self.foe, self.lang if self.lang in TEXT else "zh", self.speed, int(self.length))
             seconds = int(self.length)
+            game = Match(self.foe, self.lang if self.lang in TEXT else "zh", self.speed, seconds, ais=len(self.ais), model=self.model)
             self.frame = json.dumps(game.frame(), separators=(",", ":"))
             warm = self.phase == "warmup"
             if warm:  # a reload while the model loads is no sign the task has gone
@@ -264,7 +298,7 @@ class Game(rx.State):
         go_at = time.monotonic() + COUNTDOWN
         next_at = go_at
         away = None
-        asking: asyncio.Task[Asked] | None = None
+        asking: dict[str, asyncio.Task[Asked]] = {}
         try:
             while True:
                 now = time.monotonic()
@@ -286,9 +320,10 @@ class Game(rx.State):
                         self.phase = "lobby"
                         return
                     self._beat = time.time()
-                    if asking is not None and asking.done():
-                        self._take(game, asking.result(), now)
-                        asking = None
+                    for sid, task in list(asking.items()):
+                        if task.done():
+                            self._take(game, sid, task.result(), now)
+                            del asking[sid]
                     if self.phase == "countdown":
                         if now >= go_at:
                             self.phase, self.count = "play", 0
@@ -303,76 +338,97 @@ class Game(rx.State):
                             self._finish(game, seconds)
                             return
                     self._show(game, now)
-                    if asking is None and game.due(now):
-                        question = game.ask(now)
-                        if isinstance(question, list):
-                            asking = asyncio.create_task(_practice(question, now))
-                        else:
-                            asking = asyncio.create_task(_ask(*question, now, game.lang))
+                    for sid in game.seats:
+                        if sid not in asking and game.due(sid, now):
+                            question = game.ask(sid, now)
+                            if isinstance(question, list):
+                                asking[sid] = asyncio.create_task(_practice(question, now))
+                            else:
+                                asking[sid] = asyncio.create_task(_ask(*question, now, game.lang))
         finally:
-            if asking is not None and not asking.done():
-                asking.cancel()  # ends the hub's request, so the model stops too
+            for task in asking.values():
+                if not task.done():
+                    task.cancel()  # ends the hub's request, so the model stops too
 
-    def _take(self, game: Match, asked: Asked, now: float) -> None:
-        decision = game.take(asked, now)
+    def _take(self, game: Match, sid: str, asked: Asked, now: float) -> None:
+        decision = game.take(sid, asked, now)
         if game.model:
             self.model = game.model
         self.said = [decision, *self.said][:LOG_ROWS]
-        if game.words != self.ai_words:
-            self.ai_words = game.words
-        self.ai_note = game.note
 
     def _show(self, game: Match, now: float) -> None:
-        """The scores, the clock and what the AI is doing, where they changed."""
+        """The scores, the clock and what each AI snake is doing, where they changed."""
         world = game.world
-        you, them = world.snakes["you"], world.snakes["ai"]
+        you = world.snakes["you"]
         if (left := math.ceil(world.left)) != self.left:
             self.left = left
         if you.score != self.my_score:
             self.my_score = you.score
-        if them.score != self.ai_score:
-            self.ai_score = them.score
         out = "" if you.alive else f"{max(0.0, world.seconds(you.back_at - world.tick)):.1f}"
         if out != self.my_out:
             self.my_out = out
-        state = "out" if not them.alive else "thinking" if game.asking else "plan" if game.aim else "idle"
-        if state != self.ai_state:
-            self.ai_state = state
-        if (think := int(game.thinking(now))) != self.ai_think:
-            self.ai_think = think
-        aim = self._aim_words(game)
-        if aim != self.ai_aim:
-            self.ai_aim = aim
+        cards = [self._card(game, seat, now) for seat in game.seats.values()]
+        if cards != self.ais:
+            self.ais = cards
 
-    def _aim_words(self, game: Match) -> str:
-        if not game.aim or not game.plan:
-            return ""
-        first = game.plan[0]
+    def _card(self, game: Match, seat: Seat, now: float) -> AiCard:
         t = self.t
-        if first.label and (food := game.world.food(first.label)):
-            return f"{food.label} · {t['gold'] if food.kind == 'gold' else t['apple']}"
-        return f"({game.aim[0]},{game.aim[1]})"
+        snake = game.world.snakes[seat.id]
+        state = "out" if not snake.alive else "thinking" if seat.asking else "plan" if seat.aim else "idle"
+        think = int(game.thinking(seat.id, now))
+        status = f"{t['st_thinking']} {think} {t['sec']}" if state == "thinking" and think else t[f"st_{state}"]
+        aim = ""
+        if seat.aim and seat.plan:
+            first = seat.plan[0]
+            if first.label and (food := game.world.food(first.label)):
+                aim = f"{food.label} · {t['gold'] if food.kind == 'gold' else t['apple']}"
+            else:
+                aim = f"({seat.aim[0]},{seat.aim[1]})"
+        return AiCard(
+            id=seat.id,
+            name=seat.name,
+            score=snake.score,
+            state=state,
+            status=status,
+            slow=state == "thinking" and think >= SLOW,
+            aim=aim,
+            words=seat.words,
+            note=seat.note,
+        )
 
     def _finish(self, game: Match, seconds: int) -> None:
         summary = game.summary(seconds)
         history.save(summary)
-        you, them = summary["you"], summary["ai"]
-        self.my_score, self.ai_score = you["score"], them["score"]
-        self.left = 0
+        t = self.t
+        lines = [("you", t["you"], summary["you"], "", "")]
+        for seat, side in zip(game.seats.values(), summary["ais"]):
+            secs = side["ask_secs"]
+            lines.append((seat.id, seat.name, side, str(side["asks"]), f"{secs:.1f}" if secs is not None else "–"))
+        lines.sort(key=lambda line: -line[2]["score"])
+        places, rank, last = [], 0, None
+        for i, (sid, name, side, asks, secs) in enumerate(lines):
+            if side["score"] != last:
+                rank, last = i + 1, side["score"]
+            places.append(Place(rank, sid, name, side["score"], side["apples"], side["golds"], side["crashes"], asks, secs))
+        self.places = places
+        mine = next(p for p in places if p.id == "you")
+        tied = sum(1 for p in places if p.rank == mine.rank) > 1
+        self.outcome_tone = "ai" if mine.rank > 1 else "draw" if tied else "you"
+        if not game.crowd:
+            self.outcome = {"you": t["you_win"], "ai": t["ai_win"], "draw": t["draw"]}[self.outcome_tone]
+        elif mine.rank == 1:
+            self.outcome = t["crowd_tie"] if tied else t["crowd_first"]
+        else:
+            self.outcome = t["crowd_place"].format(n=mine.rank)
+        self.my_score, self.left = summary["you"]["score"], 0
         secs = summary["ask_secs"]
         self.rep = {
-            "you_apples": str(you["apples"]),
-            "you_golds": str(you["golds"]),
-            "you_crashes": str(you["crashes"]),
-            "ai_apples": str(them["apples"]),
-            "ai_golds": str(them["golds"]),
-            "ai_crashes": str(them["crashes"]),
             "asks": str(summary["asks"]),
             "secs": f"{secs:.1f}" if secs is not None else "–",
             "failed": str(summary["failed"]),
             "bad": str(summary["bad"]),
         }
-        self.ai_state, self.ai_think = "", 0
+        self.ais = [AiCard(id=seat.id, name=seat.name, score=side["score"], words=seat.words) for seat, side in zip(game.seats.values(), summary["ais"])]
         self.phase = "result"
         self._load_board()
 

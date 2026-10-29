@@ -1,11 +1,14 @@
-"""Every finished match, kept per opponent, so models can be compared: one JSON line per match in
-``SNAKE_DUEL_DATA_DIR`` (``~/.local/share/snake_duel`` by default; the App Store keeps it in a
-volume).
+"""Every finished match, kept per opponent and mode, so models can be compared: one JSON line per
+match in ``SNAKE_DUEL_DATA_DIR`` (``~/.local/share/snake_duel`` by default; the App Store keeps
+it in a volume).
 
-A match is ``{"at", "model", "speed", "seconds", "lang", "you": side, "ai": side, "asks",
-"ask_secs", "failed", "bad"}``, a side ``{"score", "apples", "golds", "crashes"}``; ``model`` is
-the AI Hub's label for the model that answered, or ``"practice"`` for the practice snake;
-``ask_secs`` is the AI's mean time to decide (null when it never answered).
+A match is ``{"at", "model", "mode", "snakes", "speed", "seconds", "lang", "you": side, "ais":
+[side, …], "asks", "ask_secs", "failed", "bad"}``; a side is ``{"score", "apples", "golds",
+"crashes"}``, an AI's side also has its own ``asks``, ``ask_secs``, ``failed`` and ``bad``.
+``mode`` is ``duel`` (one AI snake) or ``crowd`` (a free-for-all of ``snakes``); ``model`` is the
+AI Hub's label for the model that answered, or ``"practice"`` for practice snakes; ``ask_secs``
+is the AI's mean time to decide (null when it never answered). Matches kept before the
+free-for-all have one ``ai`` side instead of ``ais``.
 """
 
 from __future__ import annotations
@@ -39,6 +42,12 @@ def save(match: dict[str, Any]) -> None:
             f.write(json.dumps(match, ensure_ascii=False) + "\n")
 
 
+def _ais(match: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(match.get("ais"), list):
+        return [a for a in match["ais"] if isinstance(a, dict)]
+    return [match["ai"]] if isinstance(match.get("ai"), dict) else []
+
+
 def load() -> list[dict[str, Any]]:
     path = _file()
     if not path.exists():
@@ -50,7 +59,7 @@ def load() -> list[dict[str, Any]]:
                 match = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(match, dict) and isinstance(match.get("you"), dict) and isinstance(match.get("ai"), dict):
+            if isinstance(match, dict) and isinstance(match.get("you"), dict) and _ais(match):
                 out.append(match)
     return out
 
@@ -58,12 +67,13 @@ def load() -> list[dict[str, Any]]:
 @dataclasses.dataclass
 class ModelRow:
     model: str
+    mode: str  # "1 對 1", "4 條蛇混戰" …
     matches: int
-    you_won: int
-    ai_won: int
-    draws: int
-    ai_points: str  # the AI's mean score, "7.5"
-    ai_crashes: str  # its crashes per match, "0.5"
+    you_won: int  # alone at the top
+    ai_won: int  # an AI snake on top, you not
+    draws: int  # you on top with an AI snake
+    ai_points: str  # an AI snake's mean score, "7.5"
+    ai_crashes: str  # an AI snake's crashes per match, "0.5"
     ai_secs: str  # its mean time to decide, "1.2" ("–" when it never answered)
 
 
@@ -71,27 +81,36 @@ def _mean(values: list[float]) -> str:
     return f"{sum(values) / len(values):.1f}" if values else "–"
 
 
-def board(matches: list[dict[str, Any]], practice_label: str) -> list[ModelRow]:
-    """A row per opponent, the most played first; the practice snake goes by ``practice_label``."""
-    by_model: dict[str, list[dict[str, Any]]] = {}
+def board(matches: list[dict[str, Any]], words: dict[str, str]) -> list[ModelRow]:
+    """A row per opponent and mode, the most played first. ``words`` names the practice snake
+    (``practice``) and the modes (``mode_duel``, and ``mode_crowd`` with ``{n}`` snakes)."""
+    groups: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for match in matches:
-        by_model.setdefault(str(match.get("model") or "?"), []).append(match)
+        snakes = int(match.get("snakes") or 2) if match.get("mode") == "crowd" else 2
+        groups.setdefault((str(match.get("model") or "?"), snakes), []).append(match)
     rows = []
-    for model, played in by_model.items():
-        you = [int(m["you"].get("score", 0)) for m in played]
-        ai = [int(m["ai"].get("score", 0)) for m in played]
+    for (model, snakes), played in groups.items():
+        won = lost = drawn = 0
+        for m in played:
+            you, theirs = int(m["you"].get("score", 0)), [int(a.get("score", 0)) for a in _ais(m)]
+            top = max(theirs)
+            won += you > top
+            lost += you < top
+            drawn += you == top
+        sides = [a for m in played for a in _ais(m)]
         timed = [float(m["ask_secs"]) for m in played if isinstance(m.get("ask_secs"), (int, float))]
         rows.append(
             ModelRow(
-                model=practice_label if model == PRACTICE else model,
+                model=words["practice"] if model == PRACTICE else model,
+                mode=words["mode_duel"] if snakes == 2 else words["mode_crowd"].format(n=snakes),
                 matches=len(played),
-                you_won=sum(1 for a, b in zip(you, ai) if a > b),
-                ai_won=sum(1 for a, b in zip(you, ai) if b > a),
-                draws=sum(1 for a, b in zip(you, ai) if a == b),
-                ai_points=_mean([float(p) for p in ai]),
-                ai_crashes=_mean([float(m["ai"].get("crashes", 0)) for m in played]),
+                you_won=won,
+                ai_won=lost,
+                draws=drawn,
+                ai_points=_mean([float(a.get("score", 0)) for a in sides]),
+                ai_crashes=_mean([float(a.get("crashes", 0)) for a in sides]),
                 ai_secs=_mean(timed),
             )
         )
-    rows.sort(key=lambda row: (-row.matches, row.model))
+    rows.sort(key=lambda row: (-row.matches, row.model, row.mode))
     return rows

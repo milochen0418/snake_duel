@@ -1,6 +1,7 @@
 """The lobby: the opponent from the AI Hub (or the note that there is none, with Start off for it
-but on for the practice snake), speed, length and opponent kept in the browser over a reload,
-the English switch, the scoreboard, no sideways scrolling on a phone."""
+but on for the practice snake), the mode (how many AI snakes only for a free-for-all), speed,
+length, mode and opponent kept in the browser over a reload, the English switch, the
+scoreboard, no sideways scrolling on a phone."""
 
 import sys
 from pathlib import Path
@@ -32,11 +33,20 @@ with sync_playwright() as pw:
     assert "練習蛇不問 AI" in page.inner_text("[data-testid=lobby]")
     page.click("[data-testid=speed-fast]")
     page.click("[data-testid=length-120]")
-    wait_for(lambda: active(page, "length-120"), "the length chosen")
+    assert page.locator("[data-testid=crowd-3]").count() == 0  # how many AI snakes: a free-for-all only
+    page.click("[data-testid=mode-crowd]")
+    page.click("[data-testid=crowd-4]")
+    wait_for(lambda: active(page, "length-120") and active(page, "crowd-4"), "the choices made")
     page.reload()
     page.wait_for_selector("[data-testid=lobby]")
-    wait_for(lambda: active(page, "speed-fast") and active(page, "length-120") and active(page, "foe-practice"), "the choices kept")
-    shot(page, "2_practice")
+    wait_for(
+        lambda: all(active(page, k) for k in ("speed-fast", "length-120", "foe-practice", "mode-crowd", "crowd-4")),
+        "the choices kept",
+    )
+    assert "30×20" in page.inner_text("[data-testid=lobby]")
+    shot(page, "2_practice_crowd")
+    page.click("[data-testid=mode-duel]")
+    wait_for(lambda: page.locator("[data-testid=crowd-4]").count() == 0, "back to one on one")
 
     page.click("[data-testid=lang]")
     wait_for(lambda: "Snake Duel" in page.inner_text("header"), "English")
