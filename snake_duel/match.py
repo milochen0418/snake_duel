@@ -1,12 +1,14 @@
 """One match as it is played: the world, each AI snake's plan, and when to ask each AI again.
 
-No Reflex here: the page's background task (``Game.run_match``) owns a :class:`Match`, calls
-:meth:`Match.step` every tick with the person's turns, starts an ask for an AI snake whenever
-:meth:`Match.due` says so (each snake has at most one out at a time; the snakes don't wait for
-them) and hands each answer to :meth:`Match.take`. An AI snake's plan is a list of places
-(:class:`brain.Target`); it heads for the first one still there, and an answer replaces the plan.
+No Reflex here: a room (:mod:`snake_duel.rooms`) owns a :class:`Match`, calls :meth:`Match.step`
+every tick with each person's turns, starts an ask for an AI snake whenever :meth:`Match.due`
+says so (each snake has at most one out at a time; the snakes don't wait for them) and hands each
+answer to :meth:`Match.take`. An AI snake's plan is a list of places (:class:`brain.Target`); it
+heads for the first one still there, and an answer replaces the plan.
 
-A duel is the person against one AI snake (``ai1``); a free-for-all has two to four (``ai1`` …).
+A match has 2 to 5 snakes in the seats ``s1`` … ``s5``: the people playing take the first seats
+and AI snakes fill the rest, so five snakes with two people playing means three AI snakes. A
+person who leaves is taken over by an AI (:meth:`Match.hand_to_ai`), so the arena stays full.
 """
 
 from __future__ import annotations
@@ -21,12 +23,13 @@ from snake_duel.engine import Cell
 # Milliseconds per step: how fast all snakes move.
 SPEEDS = {"slow": 210, "normal": 160, "fast": 120}
 LENGTHS = {"60": 60, "120": 120}
-CROWDS = ("2", "3", "4")  # AI snakes in a free-for-all
+TOTALS = ("2", "3", "4", "5")  # snakes in the arena, people and AI snakes together
 REASK = 1.5  # seconds after an answer before the AI is asked again anyway (the board moves on)
 RETRY = 3.0  # seconds after an ask that failed
 MIN_GAP = 0.4  # seconds between the starts of two asks for one snake
 PRACTICE_SECS = 0.8  # how long a practice snake "thinks"
 SLOW = 6.0  # an ask out this long is worth a word on the page
+NAME_LEN = 12
 
 
 @dataclasses.dataclass
@@ -45,7 +48,7 @@ class Asked:
 class Decision:
     """One answer, as the page lists it."""
 
-    who: str  # the snake's id
+    who: str  # the seat's id
     name: str
     at: str  # seconds into the match
     aim: str  # where it said to go: "B → D", "(12,5)" or "—"
@@ -56,17 +59,19 @@ class Decision:
 
 @dataclasses.dataclass
 class Seat:
-    """One AI snake's mind: its plan, where it heads, and how its asks went."""
+    """One snake of the match: a person's, or an AI's with its plan and how its asks went."""
 
     id: str
     name: str
+    kind: str  # person or ai
+    left: bool = False  # a person who left, now played by an AI
     plan: list[brain.Target] = dataclasses.field(default_factory=list)
     aim: Cell | None = None
     way: list[Cell] = dataclasses.field(default_factory=list)
     words: str = ""
     note: str = ""  # why its last ask gave nothing
-    decisions: list[Decision] = dataclasses.field(default_factory=list)
     secs: list[float] = dataclasses.field(default_factory=list)
+    asks: int = 0
     failed: int = 0
     bad: int = 0
     asked_at: float = -1e9
@@ -76,21 +81,56 @@ class Seat:
     gold_new: bool = False
 
 
+def name_of(name: str, seat: int) -> str:
+    """A person's name as the board shows it, or ``P<seat>`` when they gave none."""
+    return name.strip()[:NAME_LEN] or f"P{seat}"
+
+
 class Match:
-    def __init__(self, foe: str, lang: str, speed: str, seconds: int, ais: int = 1, seed: int | None = None, model: str = "") -> None:
+    def __init__(
+        self,
+        foe: str,
+        lang: str,
+        speed: str,
+        seconds: int,
+        people: list[str],
+        total: int,
+        seed: int | None = None,
+        model: str = "",
+    ) -> None:
         self.foe = foe  # hub or practice
         self.lang = lang
         self.speed = speed if speed in SPEEDS else "normal"
-        ids = [f"ai{i}" for i in range(1, ais + 1)]
-        self.world = engine.new_world(["you", *ids], SPEEDS[self.speed], seconds, seed)
-        self.seats = {sid: Seat(sid, brain.ai_name(sid, ais)) for sid in ids}
-        self.names = {"you": "你" if lang == "zh" else "You", **{sid: seat.name for sid, seat in self.seats.items()}}
+        self.total = max(2, min(total, engine.MAX_SNAKES))
+        named = [name_of(name, i + 1) for i, name in enumerate(people[: self.total])]
+        self.people = len(named)
+        ais = self.total - self.people
+        ids = [f"s{i + 1}" for i in range(self.total)]
+        self.world = engine.new_world(ids, SPEEDS[self.speed], seconds, seed)
+        self.seats: dict[str, Seat] = {}
+        for i, sid in enumerate(ids):
+            if i < len(named):
+                self.seats[sid] = Seat(sid, named[i], "person")
+            else:
+                self.seats[sid] = Seat(sid, "AI" if ais == 1 else f"AI {i - len(named) + 1}", "ai")
         self.events: list[dict[str, Any]] = []
         self.model = model  # what the lobby was told answers; each answer says it again
 
     @property
-    def crowd(self) -> bool:
-        return len(self.seats) > 1
+    def names(self) -> dict[str, str]:
+        return {sid: seat.name for sid, seat in self.seats.items()}
+
+    @property
+    def ai_seats(self) -> dict[str, Seat]:
+        return {sid: seat for sid, seat in self.seats.items() if seat.kind == "ai"}
+
+    def hand_to_ai(self, sid: str) -> None:
+        """A person left: an AI takes their snake over (it keeps their name and their score)."""
+        seat = self.seats[sid]
+        seat.kind, seat.left = "ai", True
+        seat.plan, seat.aim, seat.way = [], None, []
+        seat.asked_at = seat.answered_at = seat.failed_at = -1e9
+        seat.asking = seat.gold_new = False
 
     # ------------------------------------------------------------ a tick
 
@@ -109,30 +149,34 @@ class Match:
             seat.plan.pop(0)
         return None
 
-    def step(self, turns: list[str]) -> list[dict[str, Any]]:
-        """One tick. ``turns`` is the person's queue of turns: the first that changes their way is
-        taken off it (the rest wait for the next ticks)."""
+    def step(self, turns: dict[str, list[str]]) -> list[dict[str, Any]]:
+        """One tick. ``turns`` holds each person's queue of turns by seat: the first that changes
+        their way is taken off it (the rest wait for the next ticks)."""
         world = self.world
-        you = world.snakes["you"]
-        turn = None
-        while turns and you.alive:
-            way = turns.pop(0)
-            if way in engine.DIRS and way not in (you.heading, engine.OPPOSITE[you.heading]):
-                turn = way
-                break
-        if not you.alive:
-            turns.clear()
-        moves: dict[str, str | None] = {"you": turn}
-        for sid in self.seats:
-            moves[sid] = engine.pilot(world, sid, self.target(sid))[0]
+        moves: dict[str, str | None] = {}
+        for sid, seat in self.seats.items():
+            if seat.kind != "person":
+                moves[sid] = engine.pilot(world, sid, self.target(sid))[0]
+                continue
+            snake = world.snakes[sid]
+            queue = turns.setdefault(sid, [])
+            turn = None
+            while queue and snake.alive:
+                way = queue.pop(0)
+                if way in engine.DIRS and way not in (snake.heading, engine.OPPOSITE[snake.heading]):
+                    turn = way
+                    break
+            if not snake.alive:
+                queue.clear()
+            moves[sid] = turn
         events = engine.step(world, moves)
         for event in events:
             if event["kind"] == "gold":
-                for seat in self.seats.values():
+                for seat in self.ai_seats.values():
                     seat.gold_new = True
-            elif event["kind"] == "crash" and event["who"] in self.seats:
+            elif event["kind"] == "crash" and self.seats[event["who"]].kind == "ai":
                 self.seats[event["who"]].plan = []  # it starts somewhere else: a new plan when it's back
-        for seat in self.seats.values():
+        for seat in self.ai_seats.values():
             self._aim(seat)
         self.events = events
         return events
@@ -143,8 +187,12 @@ class Match:
         seat.way = engine.path(self.world, snake.head, seat.aim, engine.blocked(self.world, seat.id)) if seat.aim else []
 
     def frame(self) -> dict[str, Any]:
-        aims = {sid: (seat.aim, seat.way) for sid, seat in self.seats.items()}
-        return engine.frame(self.world, self.names, aims, self.events)
+        """The board for the page's canvas, each snake with its kind (``person`` or ``ai``)."""
+        aims = {sid: (seat.aim, seat.way) for sid, seat in self.ai_seats.items()}
+        out = engine.frame(self.world, self.names, aims, self.events)
+        for snake in out["snakes"]:
+            snake["k"] = self.seats[snake["id"]].kind
+        return out
 
     # ------------------------------------------------------------ asking the AIs
 
@@ -153,7 +201,7 @@ class Match:
         or a few seconds went by since its last answer (never while an ask is out for it, or
         while it is off the board)."""
         seat = self.seats[sid]
-        if seat.asking or self.world.over or not self.world.snakes[sid].alive:
+        if seat.kind != "ai" or seat.asking or self.world.over or not self.world.snakes[sid].alive:
             return False
         if now - seat.asked_at < MIN_GAP or now - seat.failed_at < RETRY:
             return False
@@ -167,7 +215,8 @@ class Match:
         seat.asking, seat.asked_at, seat.gold_new = True, now, False
         if self.foe == "practice":
             return [brain.Target(label=label) for label in engine.greedy(self.world, sid)]
-        return brain.system(self.lang, self.world), brain.messages(self.world, sid, self.lang)
+        people = sum(1 for s in self.seats.values() if s.kind == "person")
+        return brain.system(self.lang, self.world, people, self.total - people), brain.messages(self.world, sid, self.lang, self.seats)
 
     def thinking(self, sid: str, now: float) -> float:
         """Seconds the ask out for ``sid`` has taken so far (0 when none is)."""
@@ -179,6 +228,7 @@ class Match:
         keeps the old one)."""
         seat = self.seats[sid]
         seat.asking, seat.answered_at = False, now
+        seat.asks += 1
         if asked.model:
             self.model = asked.model
         zh = self.lang == "zh"
@@ -210,7 +260,7 @@ class Match:
         if words:
             seat.words = words
         aim = " → ".join(t.label or f"({t.cell[0]},{t.cell[1]})" for t in plan if t.label or t.cell) or "—"
-        decision = Decision(
+        return Decision(
             who=sid,
             name=seat.name,
             at=f"{self.world.seconds(self.world.tick):.0f}",
@@ -219,34 +269,41 @@ class Match:
             secs=f"{asked.secs:.1f}",
             tone=tone,
         )
-        seat.decisions.append(decision)
-        return decision
 
     # ------------------------------------------------------------ the end
 
     def summary(self, seconds: int) -> dict[str, Any]:
         """The finished match, as :mod:`history` keeps it."""
 
-        def side(who: str) -> dict[str, int]:
-            s = self.world.snakes[who]
-            return {"score": s.score, "apples": s.apples, "golds": s.golds, "crashes": s.crashes}
-
         def mean(values: list[float]) -> float | None:
             return round(sum(values) / len(values), 2) if values else None
 
-        seats = list(self.seats.values())
+        sides = []
+        for sid, seat in self.seats.items():
+            snake = self.world.snakes[sid]
+            side = {
+                "name": seat.name,
+                "kind": seat.kind,
+                "score": snake.score,
+                "apples": snake.apples,
+                "golds": snake.golds,
+                "crashes": snake.crashes,
+            }
+            if seat.kind == "ai":
+                side |= {"asks": seat.asks, "ask_secs": mean(seat.secs), "failed": seat.failed, "bad": seat.bad, "left": seat.left}
+            sides.append(side)
+        ais = list(self.ai_seats.values())
         return {
             "at": round(time.time()),
             "model": history.PRACTICE if self.foe == "practice" else (self.model or "?"),
-            "mode": "crowd" if self.crowd else "duel",
-            "snakes": len(self.world.snakes),
+            "snakes": self.total,
+            "people": self.people,
             "speed": self.speed,
             "seconds": seconds,
             "lang": self.lang,
-            "you": side("you"),
-            "ais": [{**side(s.id), "asks": len(s.decisions), "ask_secs": mean(s.secs), "failed": s.failed, "bad": s.bad} for s in seats],
-            "asks": sum(len(s.decisions) for s in seats),
-            "ask_secs": mean([x for s in seats for x in s.secs]),
-            "failed": sum(s.failed for s in seats),
-            "bad": sum(s.bad for s in seats),
+            "sides": sides,
+            "asks": sum(seat.asks for seat in ais),
+            "ask_secs": mean([x for seat in ais for x in seat.secs]),
+            "failed": sum(seat.failed for seat in ais),
+            "bad": sum(seat.bad for seat in ais),
         }

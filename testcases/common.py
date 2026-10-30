@@ -61,14 +61,24 @@ def wait_for(fn, what: str, timeout: float = 30.0) -> None:
     raise AssertionError(f"timed out: {what}" + (f" (last error: {last})" if last else ""))
 
 
-def open_lobby(page: Page) -> str:
-    """Opens the lobby and waits for the AI Hub's answer: the opponent's name ("" without one)."""
-    page.goto(BASE_URL + "/", wait_until="domcontentloaded")
-    page.wait_for_selector("[data-testid=lobby]", timeout=90000)
+def open_lobby(page: Page, name: str = "", url: str = "") -> str:
+    """Opens the lobby (or a room's link) and waits for the AI Hub's answer: the opponent's name
+    ("" without one). With a ``name``, puts it in the name box first."""
+    page.goto(url or (BASE_URL + "/"), wait_until="domcontentloaded")
+    page.wait_for_selector("[data-testid=lobby], [data-testid=room]", timeout=90000)
     page.wait_for_timeout(500)
     wait_for(lambda: page.locator("[data-testid=asking]").count() == 0, "the AI Hub's answer", 30)
+    if name:
+        page.fill("[data-testid=name]", name)
+        page.locator("[data-testid=name]").blur()
+        page.wait_for_timeout(200)
     opponent = page.locator("[data-testid=opponent]")
     return opponent.inner_text().strip() if opponent.count() else ""
+
+
+def mine(f: dict, page: Page) -> dict:
+    """The snake this page steers."""
+    return snake(f, page.get_attribute("#arena", "data-me") or "")
 
 
 def frame(page: Page) -> dict:
@@ -95,20 +105,20 @@ OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
 
 def snake(f: dict, sid: str) -> dict:
-    """One snake of a frame, by id ("you", "ai1" …)."""
+    """One snake of a frame, by its seat id ("s1", "s2" …)."""
     return next(s for s in f["snakes"] if s["id"] == sid)
 
 
-def choose(f: dict) -> str | None:
-    """The arrow key that takes the person's snake towards the nearest food without boxing it in
-    or meeting another head (None: keep going)."""
-    you = snake(f, "you")
+def choose(f: dict, me: str = "s1") -> str | None:
+    """The arrow key that takes snake ``me`` towards the nearest food without boxing it in or
+    meeting another head (None: keep going)."""
+    you = snake(f, me)
     if not you["body"]:
         return None
     head, heading = tuple(you["body"][0]), you["dir"]
     taken = {tuple(c) for s in f["snakes"] for c in s["body"][:-1]}
     for other in f["snakes"]:
-        if other["id"] != "you" and other["body"]:
+        if other["id"] != me and other["body"]:
             hx, hy = other["body"][0]
             taken |= {(hx + dx, hy + dy) for dx, dy in WAYS.values()}
 
@@ -153,6 +163,7 @@ def places(page: Page) -> list[dict]:
     for tr in page.locator("[data-testid=places] tbody tr").all():
         cells = [c.inner_text().strip() for c in tr.locator("td").all()]
         rank, name, points, apples, golds, crashes = cells[:6]
+        name = name.split("\n")[0].strip()  # your own row says "（你）" under the name
         rows.append({"rank": int(rank), "name": name, "points": int(points.replace("−", "-")), "apples": int(apples), "golds": int(golds), "crashes": int(crashes), "asks": cells[6]})
     return rows
 

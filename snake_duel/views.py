@@ -1,21 +1,23 @@
-"""The page: the lobby, the arena with the scores and what each AI snake is doing, and the result."""
+"""The page: the lobby, the room people wait in, the arena with the scores and what each AI
+snake is doing, and the result."""
 
 from __future__ import annotations
 
 import reflex as rx
 
 from snake_duel.history import ModelRow
-from snake_duel.match import Decision
-from snake_duel.state import AiCard, Game, Place
+from snake_duel.match import Decision, TOTALS
+from snake_duel.rooms import Card, Chip, Place
+from snake_duel.state import AiCard, Game, Person
 
 T = Game.t
 
 CARD = "rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5"
 YOU = "text-amber-300"
 AI = "text-cyan-300"
-# Each snake's colour, by its id (the canvas draws them the same: assets/snake_duel/arena.js).
-TEXT_COLORS = {"you": YOU, "ai1": AI, "ai2": "text-violet-300", "ai3": "text-lime-300", "ai4": "text-pink-300"}
-DOT_COLORS = {"you": "bg-amber-400", "ai1": "bg-cyan-400", "ai2": "bg-violet-400", "ai3": "bg-lime-400", "ai4": "bg-pink-400"}
+# Each seat's colour; the canvas draws the snakes the same (assets/snake_duel/arena.js).
+TEXT_COLORS = {"s1": YOU, "s2": AI, "s3": "text-violet-300", "s4": "text-lime-300", "s5": "text-pink-300"}
+DOT_COLORS = {"s1": "bg-amber-400", "s2": "bg-cyan-400", "s3": "bg-violet-400", "s4": "bg-lime-400", "s5": "bg-pink-400"}
 
 
 def _color(sid: rx.Var, colors: dict[str, str], extra: str = "") -> rx.Var:
@@ -26,7 +28,7 @@ def _dot(sid: rx.Var) -> rx.Component:
     return rx.el.span(class_name=_color(sid, DOT_COLORS, "inline-block h-2.5 w-2.5 shrink-0 rounded-full"))
 
 
-def _chip(label: rx.Var | str, active: rx.Var | bool, on_click: rx.EventHandler, test_id: str) -> rx.Component:
+def _chip(label: rx.Var | str | rx.Component, active: rx.Var | bool, on_click: rx.EventHandler, test_id: str) -> rx.Component:
     return rx.el.button(
         label,
         on_click=on_click,
@@ -54,6 +56,44 @@ def header() -> rx.Component:
             class_name="flex items-center gap-1.5 rounded-full border border-slate-700 px-3 py-1 text-sm text-slate-300 hover:border-slate-500",
         ),
         class_name="flex items-center justify-between py-4",
+    )
+
+
+# ------------------------------------------------------------ the settings, shared by both views
+
+
+def _setting(label: rx.Var, *chips: rx.Component, first: bool = False) -> rx.Component:
+    return rx.el.div(
+        rx.el.div(label, class_name="mb-2 text-sm text-slate-400"),
+        rx.el.div(*chips, class_name="flex flex-wrap gap-2"),
+        class_name="" if first else "mt-4",
+    )
+
+
+def total_setting() -> rx.Component:
+    return rx.el.div(
+        _setting(
+            T["total"],
+            *[_chip(rx.fragment(n, T["total_n"]), Game.total == n, Game.set_total(n), f"total-{n}") for n in TOTALS],
+            first=True,
+        ),
+        rx.el.p(Game.total_note, data_testid="total-note", class_name="mt-2 text-sm text-slate-400"),
+    )
+
+
+def speed_and_length() -> rx.Component:
+    return rx.fragment(
+        _setting(
+            T["speed"],
+            _chip(T["speed_slow"], Game.speed == "slow", Game.set_speed("slow"), "speed-slow"),
+            _chip(T["speed_normal"], Game.speed == "normal", Game.set_speed("normal"), "speed-normal"),
+            _chip(T["speed_fast"], Game.speed == "fast", Game.set_speed("fast"), "speed-fast"),
+        ),
+        _setting(
+            T["length"],
+            _chip(T["length_60"], Game.length == "60", Game.set_length("60"), "length-60"),
+            _chip(T["length_120"], Game.length == "120", Game.set_length("120"), "length-120"),
+        ),
     )
 
 
@@ -108,48 +148,77 @@ def opponent_card() -> rx.Component:
     )
 
 
-def _setting(label: rx.Var, *chips: rx.Component, first: bool = False) -> rx.Component:
+def name_box() -> rx.Component:
     return rx.el.div(
-        rx.el.div(label, class_name="mb-2 text-sm text-slate-400"),
-        rx.el.div(*chips, class_name="flex flex-wrap gap-2"),
-        class_name="" if first else "mt-4",
+        rx.el.label(T["your_name"], class_name="mb-1 block text-sm text-slate-400"),
+        rx.el.input(
+            default_value=Game.name,
+            placeholder=T["your_name"],
+            max_length=16,
+            on_blur=Game.set_name,
+            data_testid="name",
+            class_name="w-full rounded-xl border border-slate-700 bg-slate-950/60 px-3 py-2 text-slate-100 outline-none focus:border-amber-300",
+        ),
+        rx.el.p(T["name_hint"], class_name="mt-1 text-xs text-slate-500"),
     )
 
 
 def settings_card() -> rx.Component:
     return rx.el.div(
-        _setting(
-            T["mode"],
-            _chip(T["mode_duel"], Game.mode == "duel", Game.set_mode("duel"), "mode-duel"),
-            _chip(T["mode_crowd"], Game.mode == "crowd", Game.set_mode("crowd"), "mode-crowd"),
-            first=True,
-        ),
-        rx.cond(
-            Game.mode == "crowd",
-            rx.el.div(
-                _setting(T["crowd"], *[_chip(rx.fragment(n, T["crowd_suffix"]), Game.crowd == n, Game.set_crowd(n), f"crowd-{n}") for n in ("2", "3", "4")]),
-                rx.el.p(T["crowd_note"], class_name="mt-2 text-sm text-slate-400"),
+        name_box(),
+        rx.el.div(total_setting(), class_name="mt-4"),
+        speed_and_length(),
+        rx.el.div(
+            rx.el.button(
+                rx.icon("play", size=18),
+                T["start_alone"],
+                on_click=Game.play_alone,
+                disabled=~Game.can_start,
+                data_testid="start",
+                class_name="flex flex-1 items-center justify-center gap-2 rounded-xl bg-amber-400 py-3 text-base font-semibold text-slate-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40",
             ),
+            rx.el.button(
+                rx.icon("users", size=18),
+                T["start_room"],
+                on_click=Game.host_room,
+                disabled=~Game.can_start,
+                data_testid="host",
+                class_name="flex flex-1 items-center justify-center gap-2 rounded-xl border border-amber-300/60 py-3 text-base font-semibold text-amber-200 hover:border-amber-300 disabled:cursor-not-allowed disabled:opacity-40",
+            ),
+            class_name="mt-5 flex flex-col gap-2 sm:flex-row",
         ),
-        _setting(
-            T["speed"],
-            _chip(T["speed_slow"], Game.speed == "slow", Game.set_speed("slow"), "speed-slow"),
-            _chip(T["speed_normal"], Game.speed == "normal", Game.set_speed("normal"), "speed-normal"),
-            _chip(T["speed_fast"], Game.speed == "fast", Game.set_speed("fast"), "speed-fast"),
+        class_name=CARD,
+    )
+
+
+def _room_row(card: Card) -> rx.Component:
+    return rx.el.button(
+        rx.el.div(
+            rx.el.span(card.id, class_name="font-mono text-lg font-semibold tracking-widest text-amber-200"),
+            rx.el.span(card.who, class_name="truncate text-sm text-slate-300"),
+            class_name="flex min-w-0 items-baseline gap-3",
         ),
-        _setting(
-            T["length"],
-            _chip(T["length_60"], Game.length == "60", Game.set_length("60"), "length-60"),
-            _chip(T["length_120"], Game.length == "120", Game.set_length("120"), "length-120"),
+        rx.el.span(
+            T["room_people"].replace("{people}", card.people.to_string()).replace("{total}", card.total.to_string()),
+            class_name="shrink-0 text-sm text-slate-400",
         ),
-        rx.el.button(
-            rx.icon("play", size=18),
-            T["start"],
-            on_click=Game.start,
-            disabled=~Game.can_start,
-            data_testid="start",
-            class_name="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-amber-400 py-3 text-base font-semibold text-slate-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40",
+        on_click=Game.join_room(card.id),
+        data_testid="room-row",
+        data_room=card.id,
+        class_name="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-800 px-3 py-2 text-left hover:border-amber-300/60",
+    )
+
+
+def rooms_card() -> rx.Component:
+    return rx.el.div(
+        rx.el.div(T["rooms_title"], class_name="mb-3 font-semibold"),
+        rx.cond(
+            Game.cards.length() > 0,
+            rx.el.div(rx.foreach(Game.cards, _room_row), class_name="space-y-2"),
+            rx.el.p(T["rooms_empty"], class_name="text-sm leading-relaxed text-slate-500"),
         ),
+        rx.cond(Game.join_error != "", rx.el.p(Game.join_error, data_testid="join-error", class_name="mt-3 text-sm text-rose-300")),
+        data_testid="rooms",
         class_name=CARD,
     )
 
@@ -169,7 +238,7 @@ def _board_row(row: ModelRow) -> rx.Component:
     return rx.el.tr(
         rx.el.td(
             rx.el.div(row.model, class_name="font-mono text-cyan-200"),
-            rx.el.div(row.mode, class_name="text-xs text-slate-400"),
+            rx.el.div(row.arena, class_name="text-xs text-slate-400"),
             class_name="max-w-[14rem] break-all py-2 pr-3",
         ),
         rx.el.td(row.matches, class_name="py-2 pr-3 text-right font-mono"),
@@ -223,62 +292,128 @@ def lobby() -> rx.Component:
         rx.el.p(T["tagline"], class_name="mb-5 text-slate-300"),
         rx.el.div(
             rx.el.div(opponent_card(), settings_card(), class_name="flex flex-col gap-4"),
-            rx.el.div(rules_card(), board_card(), class_name="flex min-w-0 flex-col gap-4"),
+            rx.el.div(rooms_card(), rules_card(), board_card(), class_name="flex min-w-0 flex-col gap-4"),
             class_name="grid gap-4 lg:grid-cols-2",
         ),
         data_testid="lobby",
     )
 
 
+# ------------------------------------------------------------ the room people wait in
+
+
+def _person_row(person: Person) -> rx.Component:
+    return rx.el.div(
+        rx.icon("user", size=16, class_name=rx.cond(person.me, YOU, "text-slate-400")),
+        rx.el.span(person.name, class_name=rx.cond(person.me, f"{YOU} font-medium", "text-slate-200")),
+        rx.cond(person.me, rx.el.span(T["room_you"], class_name="text-xs text-slate-400")),
+        rx.cond(person.host, rx.el.span(T["room_host"], class_name="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300")),
+        class_name="flex items-center gap-2",
+    )
+
+
+def room_view() -> rx.Component:
+    guest_settings = rx.el.div(
+        rx.el.div(T["room_settings"], class_name="text-sm text-slate-400"),
+        rx.el.div(
+            rx.el.span(Game.room_total, " ", T["total_n"]),
+            rx.el.span(" · "),
+            rx.el.span(rx.match(Game.room_speed, ("slow", T["speed_slow"]), ("fast", T["speed_fast"]), T["speed_normal"])),
+            rx.el.span(" · "),
+            rx.el.span(rx.cond(Game.room_length == "120", T["length_120"], T["length_60"])),
+            rx.el.span(" · "),
+            rx.el.span(rx.cond(Game.room_foe == "practice", T["practice"], Game.opponent)),
+            class_name="mt-1 text-slate-200",
+        ),
+        rx.el.p(Game.total_note, data_testid="total-note", class_name="mt-2 text-sm text-slate-400"),
+    )
+    return rx.el.div(
+        rx.el.div(
+            rx.el.div(
+                rx.el.div(T["room_code"], class_name="text-xs uppercase tracking-wider text-slate-400"),
+                rx.el.div(Game.code, data_testid="code", class_name="font-mono text-3xl font-bold tracking-[0.3em] text-amber-200"),
+                class_name="min-w-0",
+            ),
+            rx.el.button(
+                rx.icon("link", size=16),
+                T["room_link"],
+                on_click=[rx.set_clipboard(Game.share_link), rx.toast(T["room_copied"])],
+                data_testid="copy-link",
+                class_name="flex items-center gap-1.5 rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-500",
+            ),
+            class_name="flex items-start justify-between gap-3",
+        ),
+        rx.el.div(
+            rx.el.div(T["room_who"], class_name="mb-2 text-xs uppercase tracking-wider text-slate-400"),
+            rx.el.div(rx.foreach(Game.room_people, _person_row), class_name="space-y-1.5", data_testid="room-people"),
+            class_name="mt-5",
+        ),
+        # Someone who came by the link has not been past the lobby, so they name themselves here.
+        rx.el.div(name_box(), class_name="mt-4"),
+        rx.el.div(
+            rx.cond(Game.is_host, rx.el.div(total_setting(), speed_and_length()), guest_settings),
+            class_name="mt-5 border-t border-slate-800 pt-4",
+        ),
+        rx.el.div(
+            rx.cond(
+                Game.is_host,
+                rx.el.button(
+                    rx.icon("play", size=18),
+                    T["start"],
+                    on_click=Game.start_match,
+                    data_testid="start",
+                    class_name="flex flex-1 items-center justify-center gap-2 rounded-xl bg-amber-400 py-3 text-base font-semibold text-slate-950 hover:bg-amber-300",
+                ),
+                rx.el.div(T["room_wait"], data_testid="waiting", class_name="flex flex-1 items-center justify-center rounded-xl border border-slate-800 py-3 text-slate-400"),
+            ),
+            rx.el.button(
+                T["leave_room"],
+                on_click=Game.leave_room,
+                data_testid="leave-room",
+                class_name="rounded-xl border border-slate-700 px-4 py-3 text-slate-200 hover:border-slate-500",
+            ),
+            class_name="mt-5 flex gap-2",
+        ),
+        data_testid="room",
+        class_name=CARD + " mx-auto max-w-xl",
+    )
+
+
 # ------------------------------------------------------------ the match
 
 
-def _my_score() -> rx.Component:
+def _other_chip(chip: Chip) -> rx.Component:
     return rx.el.div(
-        rx.el.div(T["you"], class_name=f"text-xs uppercase tracking-wider {YOU} opacity-80"),
-        rx.el.div(Game.my_score, data_testid="my-score", class_name=f"font-mono text-3xl font-bold {YOU} tabular-nums"),
-        rx.cond(Game.my_out != "", rx.el.div(T["you_out"], " ", Game.my_out, " ", T["sec"], data_testid="my-out", class_name="text-xs text-rose-300")),
-        class_name="min-w-0",
-    )
-
-
-def _clock() -> rx.Component:
-    return rx.el.div(
-        rx.el.div(Game.left, data_testid="left", class_name="font-mono text-2xl font-semibold tabular-nums text-slate-100"),
-        rx.el.div(T["sec"], class_name="text-xs text-slate-400"),
-        class_name="text-center",
-    )
-
-
-def _ai_score_chip(card: AiCard) -> rx.Component:
-    return rx.el.div(
-        _dot(card.id),
-        rx.el.span(card.name, class_name="text-xs text-slate-300"),
-        rx.el.span(card.score, class_name=_color(card.id, TEXT_COLORS, "font-mono text-lg font-bold tabular-nums")),
-        data_testid="ai-score",
+        _dot(chip.id),
+        rx.el.span(chip.name, class_name="max-w-[7rem] truncate text-xs text-slate-300"),
+        rx.el.span(chip.score, data_testid="chip-score", class_name=_color(chip.id, TEXT_COLORS, "font-mono text-lg font-bold tabular-nums")),
+        data_testid="chip",
+        data_snake=chip.id,
         class_name="flex items-center gap-1.5",
     )
 
 
 def scoreboard() -> rx.Component:
-    their_side = rx.cond(
-        Game.playing_crowd,
+    return rx.el.div(
         rx.el.div(
-            rx.el.div(rx.foreach(Game.ais, _ai_score_chip), class_name="flex flex-wrap justify-end gap-x-3 gap-y-1"),
+            rx.el.div(T["you"], class_name=_color(Game.me, TEXT_COLORS, "text-xs uppercase tracking-wider opacity-80")),
+            rx.el.div(Game.my_score, data_testid="my-score", class_name=_color(Game.me, TEXT_COLORS, "font-mono text-3xl font-bold tabular-nums")),
+            rx.cond(
+                Game.my_out != "",
+                rx.el.div(T["you_out"], " ", Game.my_out, " ", T["sec"], data_testid="my-out", class_name="text-xs text-rose-300"),
+            ),
+            class_name="min-w-0",
+        ),
+        rx.el.div(
+            rx.el.div(Game.left, data_testid="left", class_name="font-mono text-2xl font-semibold tabular-nums text-slate-100"),
+            rx.el.div(T["sec"], class_name="text-xs text-slate-400"),
+            class_name="text-center",
+        ),
+        rx.el.div(
+            rx.el.div(rx.foreach(Game.others, _other_chip), class_name="flex flex-wrap justify-end gap-x-3 gap-y-1"),
             rx.el.div(Game.foe_name, class_name="mt-0.5 truncate font-mono text-xs text-slate-400"),
             class_name="min-w-0 text-right",
         ),
-        rx.el.div(
-            rx.el.div(T["ai"], class_name=f"text-xs uppercase tracking-wider {AI} opacity-80"),
-            rx.el.div(Game.ais[0].score, data_testid="ai-score", class_name=f"font-mono text-3xl font-bold {AI} tabular-nums"),
-            rx.el.div(Game.foe_name, class_name="truncate font-mono text-xs text-slate-400"),
-            class_name="min-w-0 text-right",
-        ),
-    )
-    return rx.el.div(
-        _my_score(),
-        _clock(),
-        their_side,
         class_name="grid grid-cols-[1fr_auto_1fr] items-center gap-3 rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-2",
     )
 
@@ -289,7 +424,10 @@ def _overlay() -> rx.Component:
     return rx.match(
         Game.phase,
         ("warmup", rx.el.div(rx.el.div(T["warmup"], class_name="rounded-xl bg-slate-950/80 px-4 py-3 text-cyan-200"), data_testid="warmup", class_name=box)),
-        ("countdown", rx.el.div(rx.el.div(Game.count, class_name="text-7xl font-black text-amber-200 drop-shadow-lg"), data_testid="countdown", class_name=box + " bg-slate-950/30")),
+        (
+            "countdown",
+            rx.el.div(rx.el.div(Game.count, class_name="text-7xl font-black text-amber-200 drop-shadow-lg"), data_testid="countdown", class_name=box + " bg-slate-950/30"),
+        ),
         (
             "result",
             rx.el.div(
@@ -316,6 +454,7 @@ def arena() -> rx.Component:
             id="arena",
             data_frame=Game.frame,
             data_phase=Game.phase,
+            data_me=Game.me,
             data_testid="arena",
             class_name="block aspect-[3/2] w-full touch-none select-none rounded-xl",
         ),
@@ -349,9 +488,10 @@ def ai_card(card: AiCard) -> rx.Component:
     return rx.el.div(
         rx.el.div(
             rx.el.span(_dot(card.id), class_name=rx.cond(card.state == "thinking", "flex animate-pulse", "flex")),
-            rx.el.span(card.name, class_name=_color(card.id, TEXT_COLORS, "text-sm font-semibold")),
+            rx.el.span(card.name, class_name=_color(card.id, TEXT_COLORS, "max-w-[8rem] truncate text-sm font-semibold")),
+            rx.cond(card.left, rx.el.span(T["ai_took_over"], class_name="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] text-slate-400")),
             rx.el.span(card.status, data_testid="ai-status", class_name="text-sm text-slate-300"),
-            class_name="flex items-center gap-2",
+            class_name="flex flex-wrap items-center gap-2",
         ),
         rx.cond(card.slow, rx.el.p(T["slow_note"], data_testid="slow-note", class_name="mt-2 text-sm leading-relaxed text-amber-200")),
         rx.cond(
@@ -377,7 +517,7 @@ def _said_row(d: Decision) -> rx.Component:
     return rx.el.tr(
         rx.el.td(d.at, class_name="py-1 pr-2 text-right font-mono text-slate-400"),
         rx.el.td(
-            rx.cond(Game.playing_crowd, rx.el.span(d.name, " ", class_name=_color(d.who, TEXT_COLORS, "font-sans"))),
+            rx.cond(Game.ais.length() > 1, rx.el.span(d.name, " ", class_name=_color(d.who, TEXT_COLORS, "font-sans"))),
             d.aim,
             class_name="whitespace-nowrap py-1 pr-2 font-mono text-slate-200",
         ),
@@ -417,12 +557,17 @@ def ai_panel() -> rx.Component:
 
 
 def _place_row(p: Place) -> rx.Component:
-    num = "py-1.5 pr-2 text-right font-mono"
+    num = "py-1.5 pr-1.5 text-right font-mono"
     return rx.el.tr(
         rx.el.td(p.rank, class_name=num + " text-slate-400"),
         rx.el.td(
-            rx.el.span(_dot(p.id), p.name, class_name="flex items-center gap-1.5"),
-            class_name=_color(p.id, TEXT_COLORS, "whitespace-nowrap py-1.5 pr-2"),
+            rx.el.span(
+                _dot(p.id),
+                p.name,
+                rx.cond(p.id == Game.me, rx.el.span(T["room_you"], class_name="text-xs text-slate-400")),
+                class_name="flex items-center gap-1.5",
+            ),
+            class_name=_color(p.id, TEXT_COLORS, "whitespace-nowrap py-1.5 pr-1.5"),
         ),
         rx.el.td(p.score, class_name=_color(p.id, TEXT_COLORS, num + " font-bold")),
         rx.el.td(p.apples, class_name=num),
@@ -430,20 +575,20 @@ def _place_row(p: Place) -> rx.Component:
         rx.el.td(p.crashes, class_name=num),
         rx.el.td(p.asks, class_name=num + " text-slate-400"),
         rx.el.td(p.secs, class_name="py-1.5 text-right font-mono text-slate-400"),
-        class_name="border-t border-slate-800",
+        class_name=rx.cond(p.id == Game.me, "border-t border-slate-800 bg-slate-800/40", "border-t border-slate-800"),
     )
 
 
 def result_card() -> rx.Component:
     rep = Game.rep
-    head = "pb-1 pr-2 text-right text-[11px] font-normal text-slate-400 whitespace-nowrap"
+    head = "pb-1 pr-1.5 text-right text-[11px] font-normal text-slate-400 whitespace-nowrap"
     return rx.el.div(
         rx.el.div(
             rx.el.table(
                 rx.el.thead(
                     rx.el.tr(
                         rx.el.th(T["col_rank"], class_name=head),
-                        rx.el.th(T["col_snake"], class_name="pb-1 pr-2 text-left text-[11px] font-normal text-slate-400"),
+                        rx.el.th(T["col_snake"], class_name="pb-1 pr-1.5 text-left text-[11px] font-normal text-slate-400"),
                         rx.el.th(T["col_points"], class_name=head),
                         rx.el.th(T["col_apples"], class_name=head),
                         rx.el.th(T["col_golds"], class_name=head),
@@ -453,7 +598,7 @@ def result_card() -> rx.Component:
                     )
                 ),
                 rx.el.tbody(rx.foreach(Game.places, _place_row)),
-                class_name="w-full text-sm",
+                class_name="w-full text-xs sm:text-sm",
                 data_testid="places",
             ),
             class_name="overflow-x-auto",
@@ -468,17 +613,20 @@ def result_card() -> rx.Component:
             data_testid="report",
         ),
         rx.el.div(
-            rx.el.button(
-                rx.icon("rotate-ccw", size=16),
-                T["again"],
-                on_click=Game.start,
-                disabled=~Game.can_start,
-                data_testid="again",
-                class_name="flex flex-1 items-center justify-center gap-2 rounded-xl bg-amber-400 py-2.5 font-semibold text-slate-950 hover:bg-amber-300 disabled:opacity-40",
+            rx.cond(
+                Game.is_host,
+                rx.el.button(
+                    rx.icon("rotate-ccw", size=16),
+                    T["again"],
+                    on_click=Game.start_match,
+                    data_testid="again",
+                    class_name="flex flex-1 items-center justify-center gap-2 rounded-xl bg-amber-400 py-2.5 font-semibold text-slate-950 hover:bg-amber-300",
+                ),
+                rx.el.div(T["again_wait"], class_name="flex flex-1 items-center justify-center rounded-xl border border-slate-800 py-2.5 text-sm text-slate-400"),
             ),
             rx.el.button(
                 T["to_lobby"],
-                on_click=Game.leave,
+                on_click=Game.leave_room,
                 data_testid="to-lobby",
                 class_name="flex-1 rounded-xl border border-slate-700 py-2.5 text-slate-200 hover:border-slate-500",
             ),
@@ -502,7 +650,7 @@ def match_view() -> rx.Component:
                     rx.el.button(
                         rx.icon("x", size=14),
                         T["leave"],
-                        on_click=Game.leave,
+                        on_click=Game.leave_room,
                         data_testid="leave",
                         class_name="flex items-center gap-1 rounded-full border border-slate-700 px-3 py-1 text-slate-300 hover:border-slate-500",
                     ),
@@ -523,7 +671,7 @@ def index() -> rx.Component:
     return rx.el.div(
         rx.el.div(
             header(),
-            rx.cond(Game.phase == "lobby", lobby(), match_view()),
+            rx.match(Game.phase, ("lobby", lobby()), ("room", room_view()), match_view()),
             class_name="mx-auto w-full max-w-6xl px-4 pb-10",
         ),
         class_name="min-h-screen bg-slate-950 text-slate-100",

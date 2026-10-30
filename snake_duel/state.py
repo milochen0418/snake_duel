@@ -1,33 +1,35 @@
-"""A duel or a free-for-all, per browser tab: the lobby, the countdown, the match and the result.
+"""One browser tab: the lobby, the room it is in, the match and the result.
 
-A match is one background task (``Game.run_match``) that owns a :class:`match.Match`: every tick
-it moves all snakes (the person's turns from ``_turns``, each AI snake's from its plan), puts the
-arena on the page as JSON for the canvas (``frame``), and starts an ask for each AI snake whenever
-the match says so, without waiting for it. Leaving, a new match or a tab that has gone away for
-good bump or end ``_seq``, and the task stops (cancelling the asks, which stops the model).
+The match itself belongs to the room (:mod:`snake_duel.rooms`), which every tab playing in it
+shares. This state only looks: one background task (``Game.watch``) tells the room the tab is
+still there, copies the board and the scores into this tab's own view, and while nobody is in a
+room keeps the lobby's list of open rooms fresh. Keys the person presses go straight into their
+player's turns.
+
+Playing alone opens a room of one that nobody is invited to; "找人一起玩" opens a listed room,
+and whoever joins takes a seat, with AI snakes filling the rest up to the number of snakes the
+host chose.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
-import math
 import time
 from urllib.parse import urlsplit
 
 import reflex as rx
 from reflex_ddns_auth import ai
 
-from snake_duel import brain, history
+from snake_duel import brain, history, rooms
 from snake_duel.i18n import TEXT
-from snake_duel.match import CROWDS, LENGTHS, PRACTICE_SECS, SLOW, SPEEDS, Asked, Decision, Match, Seat
+from snake_duel.match import Decision, LENGTHS, SPEEDS, TOTALS
+from snake_duel.rooms import Card, Chip, Place
 
-COUNTDOWN = 3
-ASK_TIMEOUT = 60.0  # an answer this late is about a board long gone
-WARMUP_TIMEOUT = 90.0
-STALE = 6.0  # seconds without the tab before a match is called off
-LOG_ROWS = 6
+WATCH_PLAY = 0.06  # seconds between looks at the room while a match is on
+WATCH_IDLE = 0.3  # and while waiting in a room
+CARDS_EVERY = 1.5  # seconds between refreshes of the lobby's room list
+GONE = 3.0  # seconds with the tab disconnected before this task gives up
 KEYS = {
     "ArrowUp": "up",
     "ArrowDown": "down",
@@ -44,33 +46,8 @@ KEYS = {
 }
 
 
-async def _ask(system: str, messages: list[dict[str, str]], started: float, lang: str) -> Asked:
-    out = Asked()
-    try:
-        reply = ai.stream(brain.ROLE, system, messages, max_tokens=brain.MAX_TOKENS, effort="low")
-
-        async def read() -> str:
-            return "".join([piece async for piece in reply])
-
-        out.text = await asyncio.wait_for(read(), ASK_TIMEOUT)
-        out.model, out.stop = reply.model, reply.stop
-    except asyncio.TimeoutError:
-        out.error = f"超過 {ASK_TIMEOUT:.0f} 秒沒答" if lang == "zh" else f"no answer in {ASK_TIMEOUT:.0f} s"
-    except ai.HubUnavailable as e:
-        out.error = str(e)
-    except Exception as e:  # noqa: BLE001 - whatever it was, the snake goes on without it
-        out.error = f"{type(e).__name__}: {e}"
-    out.secs = round(time.monotonic() - started, 1)
-    return out
-
-
-async def _practice(plan: list[brain.Target], started: float) -> Asked:
-    await asyncio.sleep(PRACTICE_SECS)
-    return Asked(plan=plan, secs=round(time.monotonic() - started, 1))
-
-
 def _watching(token: str) -> bool:
-    """Whether the tab that plays is still connected (True when it can't be told)."""
+    """Whether the tab is still connected (True when it can't be told)."""
     try:
         from reflex.utils import prerequisites
 
@@ -80,42 +57,36 @@ def _watching(token: str) -> bool:
 
 
 @dataclasses.dataclass
-class AiCard:
-    """An AI snake as the page shows it during a match."""
+class Person:
+    """Someone in the room, as the page lists them."""
 
-    id: str
     name: str
-    score: int = 0
-    state: str = ""  # thinking, plan, idle or out
-    status: str = ""  # the state in words, with the seconds it has been thinking
-    slow: bool = False  # it has been thinking long enough to say why
-    aim: str = ""
-    words: str = ""
-    note: str = ""
+    me: bool
+    host: bool
 
 
 @dataclasses.dataclass
-class Place:
-    """A snake's line in the result."""
+class AiCard:
+    """An AI snake as this tab shows it during a match."""
 
-    rank: int
     id: str
     name: str
-    score: int
-    apples: int
-    golds: int
-    crashes: int
-    asks: str  # "" for the person
-    secs: str
+    left: bool  # a person's snake an AI took over
+    state: str  # thinking, plan, idle or out
+    status: str  # that in words, with the seconds it has been thinking
+    slow: bool  # it has been thinking long enough to say why
+    aim: str
+    words: str
+    note: str
 
 
 class Game(rx.State):
     lang: str = rx.LocalStorage("", name="snake_duel_lang")
+    name: str = rx.LocalStorage("", name="snake_duel_name")
     speed: str = rx.LocalStorage("normal", name="snake_duel_speed")
     length: str = rx.LocalStorage("60", name="snake_duel_length")
     foe: str = rx.LocalStorage("hub", name="snake_duel_foe")  # hub or practice
-    mode: str = rx.LocalStorage("duel", name="snake_duel_mode")  # duel or crowd
-    crowd: str = rx.LocalStorage("3", name="snake_duel_crowd")  # AI snakes in a free-for-all
+    total: str = rx.LocalStorage("2", name="snake_duel_total")  # snakes in the arena, 2 to 5
 
     # the lobby
     hub_state: str = "asking"  # asking, ok, none (no hub) or error
@@ -123,16 +94,26 @@ class Game(rx.State):
     opponent: str = ""  # what answers, e.g. "Ollama (qwen2.5:7b)"
     opponent_local: bool = False
     board: list[history.ModelRow] = []
+    cards: list[Card] = []  # the open rooms
+    join_error: str = ""
+
+    # the room
+    phase: str = "lobby"  # lobby, room, warmup, countdown, play or result
+    code: str = ""
+    is_host: bool = False
+    room_people: list[Person] = []
+    room_total: int = 2
+    room_foe: str = ""
+    room_speed: str = ""
+    room_length: str = ""
 
     # the match
-    phase: str = "lobby"  # lobby, warmup, countdown, play or result
-    playing_crowd: bool = False  # this match is a free-for-all
+    me: str = ""  # which snake is this tab's
     frame: str = ""  # the arena, as JSON for the canvas
     count: int = 0
     left: int = 0
-    my_score: int = 0
-    my_out: str = ""  # seconds until the person's snake is back, after a crash
     model: str = ""
+    chips: list[Chip] = []
     ais: list[AiCard] = []
     said: list[Decision] = []
 
@@ -142,9 +123,7 @@ class Game(rx.State):
     outcome_tone: str = ""  # you, ai or draw
     rep: dict[str, str] = {}
 
-    _seq: int = 0  # a new number for every match: an older task sees it and stops
-    _turns: list[str] = []
-    _beat: float = 0.0
+    _seq: int = 0  # a new number for every page load: an older watcher sees it and stops
 
     # ------------------------------------------------------------ words
 
@@ -157,8 +136,36 @@ class Game(rx.State):
         return self.foe == "practice" or self.hub_state == "ok"
 
     @rx.var
+    def my_score(self) -> int:
+        return next((chip.score for chip in self.chips if chip.id == self.me), 0)
+
+    @rx.var
+    def my_out(self) -> str:
+        return next((chip.out for chip in self.chips if chip.id == self.me), "")
+
+    @rx.var
+    def total_note(self) -> str:
+        """How the seats are filled, as the lobby or the room has them now."""
+        t = self.t
+        if self.phase == "room":
+            people = len(self.room_people)
+            ais = max(0, self.room_total - people)
+            return (t["total_note_full"] if ais == 0 else t["total_note_room"]).format(people=people, ais=ais)
+        ais = max(0, int(self.total) - 1)
+        return t["total_note_solo"].format(n=ais) if ais else t["total_note_one"]
+
+    @rx.var
+    def others(self) -> list[Chip]:
+        """Every snake but this tab's, for the scoreboard."""
+        return [chip for chip in self.chips if chip.id != self.me]
+
+    @rx.var
     def foe_name(self) -> str:
-        return self.t["practice"] if self.foe == "practice" else (self.model or self.opponent)
+        return self.t["practice"] if (self.room_foe or self.foe) == "practice" else (self.model or self.opponent)
+
+    @rx.var
+    def share_link(self) -> str:
+        return f"{self.router.headers.origin}/?r={self.code}" if self.code else ""
 
     @rx.var
     def hub_page(self) -> str:
@@ -179,21 +186,23 @@ class Game(rx.State):
             self.speed = "normal"
         if self.length not in LENGTHS:
             self.length = "60"
-        if self.mode not in ("duel", "crowd"):
-            self.mode = "duel"
-        if self.crowd not in CROWDS:
-            self.crowd = "3"
-        # A restart of the server (a hot reload) ends the task that ran the match.
-        if self.phase in ("warmup", "countdown", "play") and time.time() - self._beat > STALE:
-            self._seq += 1
-            self.phase = "lobby"
+        if self.foe not in ("hub", "practice"):
+            self.foe = "hub"
+        if self.total not in TOTALS:
+            self.total = "2"
         self._load_board()
-        if self.phase in ("lobby", "result"):
-            return Game.check_opponent
+        self._seq += 1
+        token = self.router.session.client_token
+        room = rooms.of(token)
+        if room is None and (code := self.router.url.query_parameters.get("r", "")):
+            self._join(code.strip().upper(), token)
+        elif room is None:
+            self.phase, self.code = "lobby", ""
+        return [Game.check_opponent, Game.watch]
 
     def _load_board(self) -> None:
         t = TEXT.get(self.lang, TEXT["zh"])
-        self.board = history.board(history.load(), {"practice": t["practice"], "mode_duel": t["mode_duel_short"], "mode_crowd": t["mode_crowd_short"]})
+        self.board = history.board(history.load(), {k: t[k] for k in ("practice", "mode", "mode_people")})
 
     @rx.event
     def switch_lang(self):
@@ -201,29 +210,37 @@ class Game(rx.State):
         self._load_board()
 
     @rx.event
+    def set_name(self, name: str):
+        self.name = name.strip()[:16]
+        if (room := rooms.of(self.router.session.client_token)) is not None and room.phase == "open":
+            room.players[self.router.session.client_token].name = self.name
+
+    def _set(self, **changes: str):
+        for key, value in changes.items():
+            setattr(self, key, value)
+        room = rooms.of(self.router.session.client_token)
+        if room is not None and room.host == self.router.session.client_token and room.phase == "open":
+            rooms.set_up(room, **{k: (int(v) if k == "total" else v) for k, v in changes.items()})
+
+    @rx.event
     def set_speed(self, speed: str):
         if speed in SPEEDS:
-            self.speed = speed
+            self._set(speed=speed)
 
     @rx.event
     def set_length(self, length: str):
         if length in LENGTHS:
-            self.length = length
+            self._set(length=length)
 
     @rx.event
     def set_foe(self, foe: str):
         if foe in ("hub", "practice"):
-            self.foe = foe
+            self._set(foe=foe)
 
     @rx.event
-    def set_mode(self, mode: str):
-        if mode in ("duel", "crowd"):
-            self.mode = mode
-
-    @rx.event
-    def set_crowd(self, crowd: str):
-        if crowd in CROWDS:
-            self.crowd = crowd
+    def set_total(self, total: str):
+        if total in TOTALS:
+            self._set(total=total)
 
     @rx.event(background=True)
     async def check_opponent(self):
@@ -240,202 +257,215 @@ class Game(rx.State):
                 self.hub_state, self.opponent = "error", ""
                 self.hub_error = str(status.get("error") or "")
 
-    # ------------------------------------------------------------ a match
+    # ------------------------------------------------------------ rooms
+
+    def _open(self, listed: bool) -> rooms.Room:
+        token = self.router.session.client_token
+        if (old := rooms.of(token)) is not None:
+            rooms.leave(old, token)
+        return rooms.open_room(
+            token,
+            self.name,
+            self.lang if self.lang in TEXT else "zh",
+            self.foe,
+            self.speed,
+            self.length,
+            int(self.total),
+            listed=listed,
+            model=self.opponent if self.foe == "hub" else "",
+        )
 
     @rx.event
-    def start(self):
-        if self.phase not in ("lobby", "result") or not self.can_start:
+    def play_alone(self):
+        """A room of one that nobody is invited to, played at once."""
+        if not self.can_start:
             return
-        ais = int(self.crowd) if self.mode == "crowd" else 1
-        self._seq += 1
-        self._turns, self._beat = [], time.time()
-        self.count, self.left, self.my_score, self.my_out = COUNTDOWN, int(self.length), 0, ""
-        self.model = self.opponent if self.foe == "hub" else ""
-        self.playing_crowd = ais > 1
-        self.ais = [AiCard(id=f"ai{i}", name=brain.ai_name(f"ai{i}", ais)) for i in range(1, ais + 1)]
-        self.said, self.places, self.rep, self.outcome, self.outcome_tone = [], [], {}, "", ""
-        self.phase = "warmup" if self.foe == "hub" and self.opponent_local else "countdown"
-        return Game.run_match
+        room = self._open(listed=False)
+        self.join_error = ""
+        rooms.start(room, warm=self.opponent_local)
+        self._mirror(room, room.host)
+
+    @rx.event
+    def host_room(self):
+        """A room other people can join from the lobby or by its link."""
+        if not self.can_start:
+            return
+        room = self._open(listed=True)
+        self.join_error = ""
+        rooms.ensure_task(room)
+        self._mirror(room, room.host)
+
+    @rx.event
+    def join_room(self, code: str):
+        self._join(code, self.router.session.client_token)
+
+    def _join(self, code: str, token: str) -> None:
+        room = rooms.get(code)
+        t = self.t
+        if room is None:
+            self.join_error = t["no_room"]
+        elif room.full:
+            self.join_error = t["room_full"]
+        elif room.phase != "open":
+            self.join_error = t["room_playing"]
+        elif rooms.join(room, token, self.name):
+            self.join_error = ""
+            self.foe, self.speed, self.length = room.foe, room.speed, room.length
+            self.total = str(room.total)
+            self._mirror(room, token)
+            return
+        self.phase, self.code = "lobby", ""
+
+    @rx.event
+    def start_match(self):
+        """The host begins: everyone here takes a seat and AI snakes fill the rest."""
+        token = self.router.session.client_token
+        room = rooms.of(token)
+        if room is None or room.host != token or room.playing:
+            return
+        rooms.start(room, warm=self.foe == "hub" and self.opponent_local)
+        self._mirror(room, token)
+
+    @rx.event
+    def leave_room(self):
+        """Back to the lobby (a match left halfway isn't yours any more)."""
+        token = self.router.session.client_token
+        if (room := rooms.of(token)) is not None:
+            rooms.leave(room, token)
+        self._clear()
+        self._load_board()
+        self.cards = rooms.listing()
+        return Game.check_opponent
+
+    def _clear(self) -> None:
+        self.phase, self.code, self.is_host, self.me = "lobby", "", False, ""
+        self.room_people, self.room_foe, self.room_speed, self.room_length = [], "", "", ""
+        self.frame, self.chips, self.ais, self.said = "", [], [], []
+        self.places, self.rep, self.outcome, self.outcome_tone = [], {}, "", ""
 
     @rx.event
     def key(self, key: str):
-        if way := KEYS.get(key):
-            self._turn(way)
+        if (way := KEYS.get(key)) and self.phase in ("countdown", "play"):
+            token = self.router.session.client_token
+            if (room := rooms.of(token)) is not None:
+                rooms.turn(room, token, way)
 
     @rx.event
     def turn(self, way: str):
-        self._turn(way)
+        if way in KEYS.values():
+            return Game.key(way)
 
-    def _turn(self, way: str) -> None:
-        if self.phase not in ("countdown", "play") or way not in KEYS.values():
-            return
-        if not self._turns or self._turns[-1] != way:
-            self._turns = [*self._turns, way][-3:]
+    # ------------------------------------------------------------ watching the room
 
     @rx.event(background=True)
-    async def run_match(self):
+    async def watch(self):
+        """Tells the room this tab is still here and copies what it shows."""
         async with self:
-            if self.phase not in ("warmup", "countdown"):
-                return
             seq, token = self._seq, self.router.session.client_token
-            seconds = int(self.length)
-            game = Match(self.foe, self.lang if self.lang in TEXT else "zh", self.speed, seconds, ais=len(self.ais), model=self.model)
-            self.frame = json.dumps(game.frame(), separators=(",", ":"))
-            warm = self.phase == "warmup"
-            if warm:  # a reload while the model loads is no sign the task has gone
-                self._beat = time.time() + WARMUP_TIMEOUT
-        if warm:
-            # Loads a local model before the countdown, so its loading isn't counted as thinking.
-            try:
-                await asyncio.wait_for(ai.complete(brain.ROLE, "Reply with OK.", [{"role": "user", "content": "OK?"}], max_tokens=1), WARMUP_TIMEOUT)
-            except Exception:  # noqa: BLE001 - the first ask will say what is wrong
-                pass
+        gone_since = None
+        cards_at = 0.0
+        while True:
+            room = rooms.of(token)
+            await asyncio.sleep(WATCH_PLAY if room is not None and room.playing else WATCH_IDLE)
+            now = time.monotonic()
+            if not _watching(token):
+                gone_since = gone_since or now
+                if now - gone_since > GONE:
+                    return  # the room drops the player a few seconds later
+                continue
+            gone_since = None
+            room = rooms.of(token)
+            if room is not None:
+                rooms.touch(room, token)
             async with self:
                 if self._seq != seq:
                     return
-                self.phase, self._beat = "countdown", time.time()
-        tick = game.world.tick_ms / 1000
-        go_at = time.monotonic() + COUNTDOWN
-        next_at = go_at
-        away = None
-        asking: dict[str, asyncio.Task[Asked]] = {}
-        try:
-            while True:
-                now = time.monotonic()
-                if now < go_at:
-                    await asyncio.sleep(min(0.1, go_at - now))
+                if room is None:
+                    if self.phase != "lobby":
+                        self._clear()
+                        self._load_board()
+                    if now - cards_at >= CARDS_EVERY:
+                        cards_at = now
+                        cards = rooms.listing()
+                        if cards != self.cards:
+                            self.cards = cards
                 else:
-                    next_at += tick
-                    if (wait := next_at - time.monotonic()) > 0:
-                        await asyncio.sleep(wait)
-                    else:
-                        next_at = time.monotonic()  # fell behind: go on from now, don't rush
-                now = time.monotonic()
-                away = None if _watching(token) else (away or now)
-                async with self:
-                    if self._seq != seq:
-                        return
-                    if away is not None and now - away > STALE:
-                        self._seq += 1
-                        self.phase = "lobby"
-                        return
-                    self._beat = time.time()
-                    for sid, task in list(asking.items()):
-                        if task.done():
-                            self._take(game, sid, task.result(), now)
-                            del asking[sid]
-                    if self.phase == "countdown":
-                        if now >= go_at:
-                            self.phase, self.count = "play", 0
-                        elif (count := math.ceil(go_at - now)) != self.count:
-                            self.count = count
-                    if self.phase == "play":
-                        turns = list(self._turns)
-                        game.step(turns)
-                        self._turns = turns
-                        self.frame = json.dumps(game.frame(), separators=(",", ":"))
-                        if game.world.over:
-                            self._finish(game, seconds)
-                            return
-                    self._show(game, now)
-                    for sid in game.seats:
-                        if sid not in asking and game.due(sid, now):
-                            question = game.ask(sid, now)
-                            if isinstance(question, list):
-                                asking[sid] = asyncio.create_task(_practice(question, now))
-                            else:
-                                asking[sid] = asyncio.create_task(_ask(*question, now, game.lang))
-        finally:
-            for task in asking.values():
-                if not task.done():
-                    task.cancel()  # ends the hub's request, so the model stops too
+                    ended = self.phase != "result" and room.phase == "result"
+                    self._mirror(room, token)
+                    if ended:
+                        self._load_board()
 
-    def _take(self, game: Match, sid: str, asked: Asked, now: float) -> None:
-        decision = game.take(sid, asked, now)
-        if game.model:
-            self.model = game.model
-        self.said = [decision, *self.said][:LOG_ROWS]
-
-    def _show(self, game: Match, now: float) -> None:
-        """The scores, the clock and what each AI snake is doing, where they changed."""
-        world = game.world
-        you = world.snakes["you"]
-        if (left := math.ceil(world.left)) != self.left:
-            self.left = left
-        if you.score != self.my_score:
-            self.my_score = you.score
-        out = "" if you.alive else f"{max(0.0, world.seconds(you.back_at - world.tick)):.1f}"
-        if out != self.my_out:
-            self.my_out = out
-        cards = [self._card(game, seat, now) for seat in game.seats.values()]
-        if cards != self.ais:
+    def _mirror(self, room: rooms.Room, token: str) -> None:
+        """Copies the room into this tab's view (only what changed)."""
+        phase = "room" if room.phase == "open" else room.phase
+        if phase != self.phase:
+            self.phase = phase
+        if room.id != self.code:
+            self.code = room.id
+        if (host := room.host == token) != self.is_host:
+            self.is_host = host
+        people = [Person(p.name, p.token == token, p.token == room.host) for p in room.people]
+        if people != self.room_people:
+            self.room_people = people
+        if room.total != self.room_total:
+            self.room_total = room.total
+        for key in ("foe", "speed", "length"):
+            if getattr(room, key) != getattr(self, f"room_{key}"):
+                setattr(self, f"room_{key}", getattr(room, key))
+        player = room.players.get(token)
+        if (me := player.seat if player else "") != self.me:
+            self.me = me
+        if room.frame != self.frame:
+            self.frame = room.frame
+        if room.count != self.count:
+            self.count = room.count
+        if room.left != self.left:
+            self.left = room.left
+        if room.model and room.model != self.model:
+            self.model = room.model
+        if room.chips != self.chips:
+            self.chips = room.chips
+        if (cards := [self._card(look) for look in room.ais]) != self.ais:
             self.ais = cards
+        if room.said != self.said:
+            self.said = room.said
+        if room.rep != self.rep:
+            self.rep = room.rep
+        if room.places != self.places:
+            self.places = room.places
+            self._outcome()
 
-    def _card(self, game: Match, seat: Seat, now: float) -> AiCard:
+    def _card(self, look: rooms.AiLook) -> AiCard:
         t = self.t
-        snake = game.world.snakes[seat.id]
-        state = "out" if not snake.alive else "thinking" if seat.asking else "plan" if seat.aim else "idle"
-        think = int(game.thinking(seat.id, now))
-        status = f"{t['st_thinking']} {think} {t['sec']}" if state == "thinking" and think else t[f"st_{state}"]
-        aim = ""
-        if seat.aim and seat.plan:
-            first = seat.plan[0]
-            if first.label and (food := game.world.food(first.label)):
-                aim = f"{food.label} · {t['gold'] if food.kind == 'gold' else t['apple']}"
-            else:
-                aim = f"({seat.aim[0]},{seat.aim[1]})"
+        status = ""
+        if look.state == "thinking":
+            status = f"{t['st_thinking']} {look.think} {t['sec']}" if look.think else t["st_thinking"]
+        elif look.state:
+            status = t[f"st_{look.state}"]
+        aim = f"{look.aim} · {t['gold'] if look.gold else t['apple']}" if len(look.aim) == 1 else look.aim
         return AiCard(
-            id=seat.id,
-            name=seat.name,
-            score=snake.score,
-            state=state,
+            id=look.id,
+            name=look.name,
+            left=look.left,
+            state=look.state,
             status=status,
-            slow=state == "thinking" and think >= SLOW,
+            slow=look.slow,
             aim=aim,
-            words=seat.words,
-            note=seat.note,
+            words=look.words,
+            note=look.note,
         )
 
-    def _finish(self, game: Match, seconds: int) -> None:
-        summary = game.summary(seconds)
-        history.save(summary)
+    def _outcome(self) -> None:
         t = self.t
-        lines = [("you", t["you"], summary["you"], "", "")]
-        for seat, side in zip(game.seats.values(), summary["ais"]):
-            secs = side["ask_secs"]
-            lines.append((seat.id, seat.name, side, str(side["asks"]), f"{secs:.1f}" if secs is not None else "–"))
-        lines.sort(key=lambda line: -line[2]["score"])
-        places, rank, last = [], 0, None
-        for i, (sid, name, side, asks, secs) in enumerate(lines):
-            if side["score"] != last:
-                rank, last = i + 1, side["score"]
-            places.append(Place(rank, sid, name, side["score"], side["apples"], side["golds"], side["crashes"], asks, secs))
-        self.places = places
-        mine = next(p for p in places if p.id == "you")
-        tied = sum(1 for p in places if p.rank == mine.rank) > 1
+        mine = next((place for place in self.places if place.id == self.me), None)
+        if mine is None or not self.places:
+            self.outcome, self.outcome_tone = "", ""
+            return
+        tied = sum(1 for place in self.places if place.rank == mine.rank) > 1
         self.outcome_tone = "ai" if mine.rank > 1 else "draw" if tied else "you"
-        if not game.crowd:
+        if len(self.places) == 2:
             self.outcome = {"you": t["you_win"], "ai": t["ai_win"], "draw": t["draw"]}[self.outcome_tone]
         elif mine.rank == 1:
             self.outcome = t["crowd_tie"] if tied else t["crowd_first"]
         else:
             self.outcome = t["crowd_place"].format(n=mine.rank)
-        self.my_score, self.left = summary["you"]["score"], 0
-        secs = summary["ask_secs"]
-        self.rep = {
-            "asks": str(summary["asks"]),
-            "secs": f"{secs:.1f}" if secs is not None else "–",
-            "failed": str(summary["failed"]),
-            "bad": str(summary["bad"]),
-        }
-        self.ais = [AiCard(id=seat.id, name=seat.name, score=side["score"], words=seat.words) for seat, side in zip(game.seats.values(), summary["ais"])]
-        self.phase = "result"
-        self._load_board()
-
-    @rx.event
-    def leave(self):
-        """Back to the lobby (a match left halfway isn't kept)."""
-        self._seq += 1
-        self.phase = "lobby"
-        self._load_board()
-        return Game.check_opponent

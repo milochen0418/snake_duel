@@ -2,8 +2,8 @@
 
 Snake Duel holds no model and no key. It asks the AI Hub for the role ``fast``
 (``reflex_ddns_auth.ai``), and the hub answers with whatever model its page sets for this
-app's snakes: switching models there is how one model is tried against another. In a
-free-for-all every AI snake asks for itself, each from where it is.
+app's snakes: switching models there is how one model is tried against another. Every AI snake
+of a match asks for itself, each from where it is, with the same model.
 
 A model takes a second or more to answer, while the snakes move several times a second, so the
 AI doesn't steer each step. It says where to go, in order: food by its letter, or a cell to
@@ -13,15 +13,22 @@ by. It writes two lines, which :func:`parse` reads::
 
     Target: B, D
     Say: That gold one is mine!
+
+Every snake has a number (its seat ``s3`` is "3"), which the board's text and its map use, so an
+AI can tell the others apart whether they are people or AI snakes.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import re
+from typing import TYPE_CHECKING, Mapping
 
 from snake_duel import engine
 from snake_duel.engine import Cell, World
+
+if TYPE_CHECKING:
+    from snake_duel.match import Seat
 
 ROLE = "fast"
 # What the hub's page says this app asks the role for (reflex_ddns_auth.ai.uses).
@@ -68,11 +75,23 @@ SYSTEM = {
 INTRO = {
     "zh": {
         "duel": "你是 AI 蛇，對手是一個人，兩條蛇在同一塊 {w}×{h} 的場地上搶同一批食物。",
-        "crowd": "這是多蛇混戰：場上有一個人和 {ais} 條 AI 蛇，你是其中一條（是哪一條寫在局面裡），大家在同一塊 {w}×{h} 的場地上搶同一批食物，各自為戰。",
+        "crowd": (
+            "場上一共 {total} 條蛇：{people} 個人和 {ais} 條 AI 蛇，你是其中一條 AI 蛇"
+            "（是哪一條寫在局面裡），大家在同一塊 {w}×{h} 的場地上搶同一批食物，各自為戰。"
+        ),
+        "ais": "場上一共 {total} 條 AI 蛇，沒有人，你是其中一條（是哪一條寫在局面裡），大家在同一塊 {w}×{h} 的場地上搶同一批食物，各自為戰。",
     },
     "en": {
         "duel": "you are the AI snake, your opponent is a person, and both snakes are after the same food on one {w}×{h} board.",
-        "crowd": "this is a free-for-all: a person and {ais} AI snakes, you being one of them (which one is in the board you are shown), all after the same food on one {w}×{h} board, each for themselves.",
+        "crowd": (
+            "there are {total} snakes in the arena, {people} of them people and {ais} AI snakes, and you are one of "
+            "the AI snakes (which one is in the board you are shown); all of you are after the same food on one "
+            "{w}×{h} board, each for themselves."
+        ),
+        "ais": (
+            "there are {total} AI snakes in the arena and no people; you are one of them (which one is in the board "
+            "you are shown), all after the same food on one {w}×{h} board, each for themselves."
+        ),
     },
 }
 
@@ -104,24 +123,15 @@ class Move:
     well_formed: bool  # it kept to the two lines and named somewhere to go
 
 
-def ai_count(world: World) -> int:
-    return sum(1 for who in world.snakes if who != "you")
+def mark(sid: str) -> str:
+    """A snake's number on the map and in the text: seat ``s3`` is "3"."""
+    return sid.removeprefix("s")
 
 
-def ai_name(who: str, ais: int) -> str:
-    """An AI snake's name: "AI" when it is the only one, else "AI 1", "AI 2" …"""
-    return "AI" if ais == 1 else f"AI {who.removeprefix('ai')}"
-
-
-def mark(who: str) -> str:
-    """A snake's sign on the AI's map and in its words: 0 for the person, 1, 2 … for the AIs."""
-    return "0" if who == "you" else who.removeprefix("ai")
-
-
-def system(lang: str, world: World) -> str:
+def system(lang: str, world: World, people: int, ais: int) -> str:
     """The rules, the same for every AI snake of a match (so a model can reuse what it read)."""
-    ais = ai_count(world)
-    intro = INTRO[lang]["duel" if ais == 1 else "crowd"].format(ais=ais, w=world.w, h=world.h)
+    kind = "duel" if people == 1 and ais == 1 else "ais" if people == 0 else "crowd"
+    intro = INTRO[lang][kind].format(total=people + ais, people=people, ais=ais, w=world.w, h=world.h)
     return SYSTEM[lang].format(
         intro=intro,
         w1=world.w - 1,
@@ -133,22 +143,25 @@ def system(lang: str, world: World) -> str:
     )
 
 
-def prompt(world: World, me: str, lang: str) -> str:
-    """The board as AI snake ``me`` sees it: the scores, every snake, every food with how many
-    steps it and the nearest other snake are from it, and in a duel the map. A free-for-all
-    leaves the map out: several snakes asking one local model in turn would wait half as long
-    again for it (the steps already go round the bodies)."""
+def prompt(world: World, me: str, lang: str, seats: Mapping[str, "Seat"]) -> str:
+    """The board as AI snake ``me`` sees it: the scores, every snake with its number, every food
+    with how many steps it and the nearest other snake are from it, and with only two snakes the
+    map. More snakes leave the map out: several of them asking one local model in turn would
+    wait half as long again for it (the steps already go round the bodies)."""
     zh = lang == "zh"
-    ais = ai_count(world)
     mine = world.snakes[me]
     others = world.others(me)
     ways = _WAYS[lang]
 
-    def called(who: str) -> str:
-        return ("人" if zh else "the person") if who == "you" else ai_name(who, ais)
-
-    def tag(who: str) -> str:
-        return f"{called(who)}（{mark(who)} 號）" if zh else f"{called(who)} (#{mark(who)})"
+    def tag(sid: str) -> str:
+        seat = seats[sid]
+        if seat.left:
+            what = f"{seat.name}，AI 接手" if zh else f"{seat.name}, taken over by an AI"
+        elif seat.kind == "person":
+            what = f"人：{seat.name}" if zh else f"a person: {seat.name}"
+        else:
+            what = seat.name
+        return f"{mark(sid)} 號（{what}）" if zh else f"#{mark(sid)} ({what})"
 
     def back_in(snake: engine.Snake) -> float:
         return max(0.0, world.seconds(snake.back_at - world.tick))
@@ -160,26 +173,27 @@ def prompt(world: World, me: str, lang: str) -> str:
         return f"head at ({x},{y}), moving {ways[snake.heading]}, length {size}."
 
     left = round(world.left)
-    scores = [f"{called(who)} {s.score}" for who, s in others.items()]
+    scores = [f"{mark(sid)} 號 {s.score}" if zh else f"#{mark(sid)} {s.score}" for sid, s in others.items()]
     lines = [
         f"剩 {left} 秒。分數：你 {mine.score}，{'，'.join(scores)}。" if zh else f"{left} s left. Scores: you {mine.score}, {', '.join(scores)}.",
     ]
-    me_called = ("AI 蛇" if zh else "the AI snake") if ais == 1 else ai_name(me, ais)
     if mine.alive:
-        lines.append(f"你（{me_called}）：{where(mine)}" if zh else f"You ({me_called}): {where(mine)}")
+        lines.append(f"你是 {tag(me)}：{where(mine)}" if zh else f"You are {tag(me)}: {where(mine)}")
     else:
-        lines.append(f"你剛撞到，{back_in(mine):.1f} 秒後回到場上。" if zh else f"You just crashed, back in {back_in(mine):.1f} s.")
-    for who, snake in others.items():
+        lines.append(
+            f"你是 {tag(me)}，剛撞到，{back_in(mine):.1f} 秒後回到場上。" if zh else f"You are {tag(me)}, just crashed, back in {back_in(mine):.1f} s."
+        )
+    for sid, snake in others.items():
         if snake.alive:
-            lines.append(f"{tag(who)}：{where(snake)}" if zh else f"{tag(who)}: {where(snake)}")
+            lines.append(f"{tag(sid)}：{where(snake)}" if zh else f"{tag(sid)}: {where(snake)}")
         else:
-            lines.append(f"{tag(who)}剛撞到，{back_in(snake):.1f} 秒後回來。" if zh else f"{tag(who)} just crashed, back in {back_in(snake):.1f} s.")
+            lines.append(f"{tag(sid)}剛撞到，{back_in(snake):.1f} 秒後回來。" if zh else f"{tag(sid)} just crashed, back in {back_in(snake):.1f} s.")
 
     lines.append("食物（步數是照現在的蛇身算的最短路）：" if zh else "Food (steps: the shortest way past the bodies as they are now):")
     for food in sorted(world.foods, key=lambda f: f.label):
         x, y = food.cell
         own = engine.distance(world, me, food.cell)
-        near = min(((d, who) for who in others if (d := engine.distance(world, who, food.cell)) is not None), default=None)
+        near = min(((d, sid) for sid in others if (d := engine.distance(world, sid, food.cell)) is not None), default=None)
         if zh:
             kind = f"金果 +{food.points}" if food.kind == "gold" else f"蘋果 +{food.points}"
             gone = f"，{world.seconds(food.until - world.tick):.0f} 秒後消失" if food.until else ""
@@ -192,7 +206,7 @@ def prompt(world: World, me: str, lang: str) -> str:
             yours = f"{own} steps" if own is not None else "can't get there"
             theirs = f"the nearest other snake is #{mark(near[1])}, {near[0]} steps" if near else "no other snake can get there"
             lines.append(f"{food.label} {kind} at ({x},{y}){gone}: you {yours}; {theirs}")
-    if ais == 1:
+    if len(world.snakes) == 2:
         lines.append(
             "地圖（Y 你的頭，y 你的身體，數字是別的蛇的頭（號碼同上），o 別的蛇的身體，字母是食物，. 是空地）："
             if zh
@@ -207,12 +221,12 @@ def _map(world: World, me: str) -> list[str]:
     pad = "    "
     tens = "".join(str(x // 10) for x in range(world.w))
     ones = "".join(str(x % 10) for x in range(world.w))
-    rows = engine.grid(world, me, {who: mark(who) for who in world.snakes})
+    rows = engine.grid(world, me, {sid: mark(sid) for sid in world.snakes})
     return [pad + tens, pad + ones, *(f"{y:>2}  {row}" for y, row in enumerate(rows))]
 
 
-def messages(world: World, me: str, lang: str) -> list[dict[str, str]]:
-    return [{"role": "user", "content": prompt(world, me, lang)}]
+def messages(world: World, me: str, lang: str, seats: Mapping[str, "Seat"]) -> list[dict[str, str]]:
+    return [{"role": "user", "content": prompt(world, me, lang, seats)}]
 
 
 def parse(text: str, labels: set[str] | None = None, w: int = engine.CROWD[0], h: int = engine.CROWD[1]) -> Move:

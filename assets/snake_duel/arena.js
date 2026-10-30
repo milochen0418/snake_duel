@@ -7,13 +7,13 @@
 (() => {
   "use strict";
 
-  // Each snake's colours, by its id (the page uses the same ones: snake_duel/views.py).
+  // Each seat's colours, by its id (the page uses the same ones: snake_duel/views.py).
   const COLORS = {
-    you: { light: "#fde68a", body: "#f59e0b", dark: "#92400e" },
-    ai1: { light: "#a5f3fc", body: "#22d3ee", dark: "#155e75" },
-    ai2: { light: "#ddd6fe", body: "#a78bfa", dark: "#5b21b6" },
-    ai3: { light: "#d9f99d", body: "#a3e635", dark: "#3f6212" },
-    ai4: { light: "#fbcfe8", body: "#f472b6", dark: "#9d174d" },
+    s1: { light: "#fde68a", body: "#f59e0b", dark: "#92400e" },
+    s2: { light: "#a5f3fc", body: "#22d3ee", dark: "#155e75" },
+    s3: { light: "#ddd6fe", body: "#a78bfa", dark: "#5b21b6" },
+    s4: { light: "#d9f99d", body: "#a3e635", dark: "#3f6212" },
+    s5: { light: "#fbcfe8", body: "#f472b6", dark: "#9d174d" },
   };
   const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
   const GLIDE = 0.55; // of a step: how long a snake takes to slide into its next cell
@@ -32,7 +32,8 @@
 
   const lerp = (a, b, t) => a + (b - a) * t;
   const near = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) === 1;
-  const colors = (id) => COLORS[id] || COLORS.ai1;
+  const colors = (id) => COLORS[id] || COLORS.s2;
+  const mine = () => (canvas && canvas.dataset.me) || "";
   const alpha = (hex, a) => {
     const n = parseInt(hex.slice(1), 16);
     return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
@@ -279,17 +280,51 @@
     }
   }
 
-  function drawNames(cell) {
-    // Before the start: which snake is whose.
+  function drawNames(cell, all) {
+    // Before the start every snake is named; during a match only yours, so you can find it.
+    const me = mine();
     for (const s of cur.snakes) {
-      if (!s.body.length) continue;
+      if (!s.body.length || (!all && s.id !== me)) continue;
       const [x, y] = s.body[0];
+      const c = colors(s.id);
+      const cx = (x + 0.5) * cell;
+      const top = (y - 0.55) * cell;
       ctx.font = `bold ${Math.round(cell * 0.5)}px ui-sans-serif, system-ui, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = colors(s.id).light;
-      ctx.fillText(s.n, (x + 0.5) * cell, (y - 0.15) * cell);
+      ctx.lineJoin = "round";
+      ctx.lineWidth = Math.max(2, cell * 0.22);
+      ctx.strokeStyle = "rgba(2, 6, 23, 0.85)"; // so a name over a body stays readable
+      ctx.strokeText(s.n, cx, top);
+      ctx.fillStyle = c.light;
+      ctx.fillText(s.n, cx, top);
+      if (s.id !== me) continue;
+      // yours: a line under the name
+      const half = ctx.measureText(s.n).width / 2;
+      ctx.strokeStyle = "#f8fafc";
+      ctx.lineWidth = Math.max(1.5, cell * 0.07);
+      ctx.beginPath();
+      ctx.moveTo(cx - half, top + cell * 0.14);
+      ctx.lineTo(cx + half, top + cell * 0.14);
+      ctx.stroke();
     }
+  }
+
+  function drawMine(cell, now) {
+    const s = cur.snakes.find((snake) => snake.id === mine());
+    if (!s || !s.body.length) return;
+    const ps = prev && prev[s.id];
+    const t = ps ? Math.min(1, (now - at) / (cur.ms * GLIDE)) : 1;
+    const [hx, hy] = points(s, ps, t)[0];
+    ctx.save();
+    ctx.strokeStyle = "rgba(248, 250, 252, 0.75)";
+    ctx.lineWidth = Math.max(1, cell * 0.06);
+    ctx.setLineDash([cell * 0.22, cell * 0.18]);
+    ctx.lineDashOffset = now / 120;
+    ctx.beginPath();
+    ctx.arc(hx * cell, hy * cell, cell * 0.62, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   function draw(now) {
@@ -301,10 +336,13 @@
     drawGround(cell);
     drawAims(cell, now);
     drawFood(cell, now);
-    // the person's snake on top
-    for (const s of cur.snakes) if (s.id !== "you") drawSnake(s, cell, t);
-    for (const s of cur.snakes) if (s.id === "you") drawSnake(s, cell, t);
-    if (["warmup", "countdown"].includes(canvas.dataset.phase)) drawNames(cell);
+    // your own snake on top of the others
+    const me = mine();
+    for (const s of cur.snakes) if (s.id !== me) drawSnake(s, cell, t);
+    for (const s of cur.snakes) if (s.id === me) drawSnake(s, cell, t);
+    drawMine(cell, now);
+    const waiting = ["warmup", "countdown"].includes(canvas.dataset.phase);
+    if (waiting || cur.snakes.length > 2) drawNames(cell, waiting);
     drawEffects(cell, now);
   }
 

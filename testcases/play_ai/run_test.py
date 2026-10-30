@@ -23,14 +23,14 @@ with sync_playwright() as pw:
         log("SKIP: no AI Hub opponent here")
         raise SystemExit(0)
     log("opponent:", opponent)
-    page.click("[data-testid=mode-duel]")
+    page.click("[data-testid=total-2]")
     page.click("[data-testid=speed-slow]")
     page.click("[data-testid=length-60]")
     page.click("[data-testid=start]")
     wait_for(lambda: page.locator("[data-testid=countdown]").count() == 1, "the countdown (after the warm-up)", 120)
     wait_for(lambda: page.locator("[data-testid=countdown]").count() == 0, "the start", 10)
 
-    card = "[data-testid=ai-card][data-ai=ai1]"
+    card = "[data-testid=ai-card][data-ai=s2]"
     deadline = time.time() + 100
     last, followed, words, statuses, shots = -1, 0, set(), set(), 0
     while page.locator("[data-testid=result]").count() == 0:
@@ -40,15 +40,19 @@ with sync_playwright() as pw:
             last = f["t"]
             if key := choose(f):
                 page.keyboard.press(key)
-            statuses.add(page.inner_text(f"{card} [data-testid=ai-status]"))
+            # The panel gives way to the result the moment the match ends, so read it if it is there.
+            status = page.locator(f"{card} [data-testid=ai-status]")
+            if status.count():
+                statuses.add(status.inner_text())
             aim = page.locator(f"{card} [data-testid=ai-aim]")
-            mine = next((a for a in f.get("aims", []) if a["id"] == "ai1"), None)
+            mine = next((a for a in f.get("aims", []) if a["id"] == "s2"), None)
             if aim.count() and mine:
                 label = aim.inner_text().split("·")[0].strip()
                 food = next((fd for fd in f["food"] if fd["l"] == label), None)
                 followed += bool(food and [food["x"], food["y"]] == mine["aim"])
-            if page.locator(f"{card} [data-testid=ai-words]").count():
-                words.add(page.inner_text(f"{card} [data-testid=ai-words]"))
+            said = page.locator(f"{card} [data-testid=ai-words]")
+            if said.count():
+                words.add(said.inner_text())
             if not shots and last > 120:
                 shot(page, "1_playing")
                 shots = 1
