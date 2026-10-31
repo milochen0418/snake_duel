@@ -31,8 +31,7 @@ with sync_playwright() as pw:
     shot(page, "1_lobby")
 
     page.click("[data-testid=foe-practice]")
-    wait_for(start.is_enabled, "the buttons on for the practice snake")
-    assert "練習蛇不問 AI" in page.inner_text("[data-testid=lobby]")
+    wait_for(lambda: start.is_enabled() and "練習蛇不問 AI" in page.inner_text("[data-testid=lobby]"), "the buttons on for the practice snake")
     page.click("[data-testid=total-5]")
     wait_for(lambda: "4" in page.inner_text("[data-testid=total-note]"), "five seats: you and four AI snakes")
     page.click("[data-testid=total-2]")

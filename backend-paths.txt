@@ -1,0 +1,5 @@
+# Extra URL paths that re-ddns' nginx should send to the backend (Reflex/Starlette) port instead
+# of the frontend port. One path per line; comments (#) and blank lines are ignored.
+
+# Invite links and their pictures, see snake_duel/api.py.
+/r/

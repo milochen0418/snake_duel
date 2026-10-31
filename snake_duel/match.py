@@ -8,7 +8,9 @@ heads for the first one still there, and an answer replaces the plan.
 
 A match has 2 to 5 snakes in the seats ``s1`` … ``s5``: the people playing take the first seats
 and AI snakes fill the rest, so five snakes with two people playing means three AI snakes. A
-person who leaves is taken over by an AI (:meth:`Match.hand_to_ai`), so the arena stays full.
+person who goes away is taken over by an AI (:meth:`Match.hand_to_ai`), so the arena stays full;
+someone who comes back, or who was watching, takes a snake from an AI
+(:meth:`Match.hand_to_person`).
 """
 
 from __future__ import annotations
@@ -64,7 +66,8 @@ class Seat:
     id: str
     name: str
     kind: str  # person or ai
-    left: bool = False  # a person who left, now played by an AI
+    avatar: str = ""  # a person's picture, for who is who on the page
+    left: bool = False  # a person who went away, now played by an AI
     plan: list[brain.Target] = dataclasses.field(default_factory=list)
     aim: Cell | None = None
     way: list[Cell] = dataclasses.field(default_factory=list)
@@ -115,6 +118,7 @@ class Match:
                 self.seats[sid] = Seat(sid, "AI" if ais == 1 else f"AI {i - len(named) + 1}", "ai")
         self.events: list[dict[str, Any]] = []
         self.model = model  # what the lobby was told answers; each answer says it again
+        self.had_ai = ais > 0  # an AI played some snake (for the scoreboard)
 
     @property
     def names(self) -> dict[str, str]:
@@ -131,6 +135,16 @@ class Match:
         seat.plan, seat.aim, seat.way = [], None, []
         seat.asked_at = seat.answered_at = seat.failed_at = -1e9
         seat.asking = seat.gold_new = False
+        self.had_ai = True
+
+    def hand_to_person(self, sid: str, name: str = "", avatar: str = "") -> None:
+        """A person takes a snake from an AI: their own coming back, or (with ``name``) one they
+        were watching. The snake goes on as it is, with its score."""
+        seat = self.seats[sid]
+        seat.kind, seat.left = "person", False
+        seat.plan, seat.aim, seat.way = [], None, []
+        if name:
+            seat.name, seat.avatar = name, avatar
 
     # ------------------------------------------------------------ a tick
 
@@ -295,9 +309,9 @@ class Match:
         ais = list(self.ai_seats.values())
         return {
             "at": round(time.time()),
-            "model": history.PRACTICE if self.foe == "practice" else (self.model or "?"),
+            "model": history.PEOPLE if not self.had_ai else history.PRACTICE if self.foe == "practice" else (self.model or "?"),
             "snakes": self.total,
-            "people": self.people,
+            "people": sum(1 for seat in self.seats.values() if seat.kind == "person" or seat.left),
             "speed": self.speed,
             "seconds": seconds,
             "lang": self.lang,

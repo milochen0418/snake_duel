@@ -100,6 +100,36 @@ def test_a_snake_handed_to_an_ai_keeps_its_name_and_is_asked():
     assert m.frame()["snakes"][1]["k"] == "ai"
 
 
+def test_a_person_takes_a_snake_from_an_ai():
+    m = Match("practice", "zh", "normal", 60, ["小明"], 3, seed=1)
+    m.seats["s2"].plan = [Target(label="A")]
+    m.hand_to_person("s2", "阿美", "pic")
+    seat = m.seats["s2"]
+    assert (seat.kind, seat.name, seat.avatar, seat.plan) == ("person", "阿美", "pic", [])
+    assert not m.due("s2", 1.0) and m.frame()["snakes"][1]["k"] == "person" and m.frame()["snakes"][1]["n"] == "阿美"
+    m.step({"s2": ["down"]})  # steered by keys now
+
+
+def test_someone_coming_back_keeps_their_name():
+    m = Match("practice", "zh", "normal", 60, ["小明", "阿美"], 3, seed=1)
+    m.hand_to_ai("s2")
+    m.hand_to_person("s2")
+    assert (m.seats["s2"].kind, m.seats["s2"].name, m.seats["s2"].left) == ("person", "阿美", False)
+
+
+def test_a_match_of_people_only_is_kept_as_that():
+    m = Match("hub", "zh", "normal", 60, ["小明", "阿美"], 2, seed=1, model="Ollama (x)")
+    assert m.summary(60)["model"] == history.PEOPLE and m.summary(60)["people"] == 2
+    m.hand_to_ai("s2")
+    assert m.summary(60)["model"] == "Ollama (x)" and m.summary(60)["people"] == 2  # an AI played too
+
+
+def test_a_person_who_took_a_snake_over_counts():
+    m = Match("practice", "zh", "normal", 60, ["小明"], 3, seed=1)
+    m.hand_to_person("s2", "阿美")
+    assert m.summary(60)["people"] == 2
+
+
 def test_the_practice_snake_plans_at_once():
     m = Match("practice", "en", "normal", 60, ["P"], 2, seed=1)
     plan = m.ask("s2", 0.0)

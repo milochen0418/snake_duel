@@ -1,9 +1,13 @@
 // Snake Duel's arena. The server sends the board once a step, as JSON in the canvas's
-// data-frame; this draws it, gliding the snakes from one step to the next, with where each AI
-// snake is heading, the food and a little burst when something is eaten or someone crashes. It
-// also turns swipes on the board and the on-screen pad into arrow keys (the page's key listener
-// sends those to the server), and keeps the arrow keys from scrolling the page while the arena is
-// shown.
+// data-frame; this draws it, gliding the snakes from one step to the next, with who is who, where
+// each AI snake is heading, the food and a little burst when something is eaten or someone
+// crashes. It also turns swipes on the board and the on-screen pad into arrow keys (the page's
+// key listener sends those to the server), and keeps the arrow keys from scrolling the page while
+// the arena is shown.
+//
+// Two more things any page of the game needs: its heartbeat (a click on a hidden button every
+// BEAT ms, which tells the server this person is still here, also after a lost connection), and
+// the share button (the phone's share sheet, else the clipboard).
 (() => {
   "use strict";
 
@@ -18,6 +22,7 @@
   const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
   const GLIDE = 0.55; // of a step: how long a snake takes to slide into its next cell
   const GOLD_LASTS = 8; // seconds, as the server keeps it
+  const BEAT = 1500; // ms between heartbeats
 
   let canvas = null;
   let ctx = null;
@@ -29,6 +34,9 @@
   let cssW = 0;
   let cssH = 0;
   let dpr = 1;
+  let facesRaw = "";
+  let faces = {}; // each person's picture by seat
+  const pictures = new Map(); // loaded pictures by address
 
   const lerp = (a, b, t) => a + (b - a) * t;
   const near = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) === 1;
@@ -280,32 +288,67 @@
     }
   }
 
-  function drawNames(cell, all) {
-    // Before the start every snake is named; during a match only yours, so you can find it.
+  function picture(url) {
+    if (!pictures.has(url)) {
+      const img = new Image();
+      img.referrerPolicy = "no-referrer"; // Google's account pictures refuse other sites' referrers
+      img.src = url;
+      pictures.set(url, img);
+    }
+    const img = pictures.get(url);
+    return img.complete && img.naturalWidth ? img : null;
+  }
+
+  function readFaces() {
+    const text = canvas.dataset.faces || "{}";
+    if (text === facesRaw) return;
+    facesRaw = text;
+    try {
+      faces = JSON.parse(text);
+    } catch (e) {
+      faces = {};
+    }
+  }
+
+  // Who is who: every snake's name over its head, with the person's picture, gliding with it.
+  function drawNames(cell, t) {
     const me = mine();
+    const size = Math.max(10, Math.round(cell * 0.46));
+    const face = Math.max(14, cell * 0.72);
+    ctx.font = `bold ${size}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
     for (const s of cur.snakes) {
-      if (!s.body.length || (!all && s.id !== me)) continue;
-      const [x, y] = s.body[0];
-      const c = colors(s.id);
-      const cx = (x + 0.5) * cell;
-      const top = (y - 0.55) * cell;
-      ctx.font = `bold ${Math.round(cell * 0.5)}px ui-sans-serif, system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "bottom";
-      ctx.lineJoin = "round";
-      ctx.lineWidth = Math.max(2, cell * 0.22);
+      if (!s.body.length) continue;
+      const [hx, hy] = points(s, prev && prev[s.id], t)[0];
+      const img = faces[s.id] ? picture(faces[s.id]) : null;
+      const textWidth = ctx.measureText(s.n).width;
+      const width = textWidth + (img ? face + 3 : 0);
+      // over the head, or under it on the top row, and always on the board
+      const y = (hy >= 1.5 ? hy - 0.95 : hy + 0.95) * cell;
+      const left = Math.min(cssW - width - 2, Math.max(2, hx * cell - width / 2));
+      if (img) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(left + face / 2, y, face / 2, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(img, left, y - face / 2, face, face);
+        ctx.restore();
+      }
+      const textLeft = left + (img ? face + 3 : 0);
+      ctx.textAlign = "left";
+      ctx.lineWidth = Math.max(2, cell * 0.2);
       ctx.strokeStyle = "rgba(2, 6, 23, 0.85)"; // so a name over a body stays readable
-      ctx.strokeText(s.n, cx, top);
-      ctx.fillStyle = c.light;
-      ctx.fillText(s.n, cx, top);
+      ctx.strokeText(s.n, textLeft, y);
+      ctx.fillStyle = colors(s.id).light;
+      ctx.fillText(s.n, textLeft, y);
       if (s.id !== me) continue;
       // yours: a line under the name
-      const half = ctx.measureText(s.n).width / 2;
       ctx.strokeStyle = "#f8fafc";
       ctx.lineWidth = Math.max(1.5, cell * 0.07);
       ctx.beginPath();
-      ctx.moveTo(cx - half, top + cell * 0.14);
-      ctx.lineTo(cx + half, top + cell * 0.14);
+      ctx.moveTo(textLeft, y + size * 0.62);
+      ctx.lineTo(textLeft + textWidth, y + size * 0.62);
       ctx.stroke();
     }
   }
@@ -341,8 +384,8 @@
     for (const s of cur.snakes) if (s.id !== me) drawSnake(s, cell, t);
     for (const s of cur.snakes) if (s.id === me) drawSnake(s, cell, t);
     drawMine(cell, now);
-    const waiting = ["warmup", "countdown"].includes(canvas.dataset.phase);
-    if (waiting || cur.snakes.length > 2) drawNames(cell, waiting);
+    readFaces();
+    drawNames(cell, t);
     drawEffects(cell, now);
   }
 
@@ -357,6 +400,36 @@
   function press(key) {
     window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   }
+
+  setInterval(() => {
+    const beat = document.getElementById("snake-beat");
+    if (beat) beat.click();
+  }, BEAT);
+
+  document.addEventListener("click", async (e) => {
+    const button = e.target.closest && e.target.closest("[data-share]");
+    if (!button) return;
+    const url = button.dataset.share;
+    if (navigator.share && window.matchMedia("(pointer: coarse)").matches) {
+      try {
+        await navigator.share({ title: button.dataset.title, url });
+        return;
+      } catch (err) {
+        if (err.name === "AbortError") return; // they changed their mind
+      }
+    }
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+    } catch (err) {
+      copied = false; // no clipboard here (not https, or refused): say so
+    }
+    const label = button.querySelector("span");
+    const before = label.textContent;
+    label.textContent = copied ? button.dataset.done : button.dataset.failed;
+    setTimeout(() => (label.textContent = before), 2500);
+  });
 
   window.addEventListener(
     "keydown",

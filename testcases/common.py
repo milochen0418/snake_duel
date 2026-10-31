@@ -21,8 +21,8 @@ def log(*args) -> None:
     print(f"[{time.time() - _T0:6.2f}]", *args, flush=True)
 
 
-def launch(pw: Playwright) -> Browser:
-    args = []
+def launch(pw: Playwright, *extra: str) -> Browser:
+    args = list(extra)
     if BASE_URL.startswith("https://") and ".reflex-ddns.com" in BASE_URL:
         # A Mac may resolve *.reflex-ddns.com to the Docker-internal IP.
         args.append("--host-resolver-rules=MAP *.reflex-ddns.com 127.0.0.1")
@@ -35,7 +35,8 @@ def new_page(browser: Browser, errors: list[str], *, locale: str = "zh-TW", widt
     page.set_default_timeout(TIMEOUT)
 
     def on_console(msg) -> None:  # noqa: ANN001
-        if msg.type == "error" and "Outdated Optimize Dep" not in msg.text and "Failed to load resource" not in msg.text:
+        expected = ("Outdated Optimize Dep", "Failed to load resource", "ERR_INTERNET_DISCONNECTED")  # a suite may go offline
+        if msg.type == "error" and not any(word in msg.text for word in expected):
             errors.append(f"console: {msg.text}")
 
     page.on("console", on_console)
@@ -162,8 +163,8 @@ def places(page: Page) -> list[dict]:
     rows = []
     for tr in page.locator("[data-testid=places] tbody tr").all():
         cells = [c.inner_text().strip() for c in tr.locator("td").all()]
-        rank, name, points, apples, golds, crashes = cells[:6]
-        name = name.split("\n")[0].strip()  # your own row says "（你）" under the name
+        rank, _, points, apples, golds, crashes = cells[:6]
+        name = tr.locator("[data-testid=place-name]").inner_text().strip()
         rows.append({"rank": int(rank), "name": name, "points": int(points.replace("−", "-")), "apples": int(apples), "golds": int(golds), "crashes": int(crashes), "asks": cells[6]})
     return rows
 

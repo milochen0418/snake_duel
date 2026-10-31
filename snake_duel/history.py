@@ -6,8 +6,8 @@ A match is ``{"at", "model", "snakes", "people", "speed", "seconds", "lang", "si
 "asks", "ask_secs", "failed", "bad"}``; a side is ``{"name", "kind", "score", "apples", "golds",
 "crashes"}``, and an AI's side also has its own ``asks``, ``ask_secs``, ``failed``, ``bad`` and
 ``left`` (a person's snake it took over). ``model`` is the AI Hub's label for the model that
-answered, or ``"practice"`` for practice snakes; ``ask_secs`` is the mean time to decide (null
-when no AI ever answered). Matches kept before people could play together have ``you`` and
+answered, ``"practice"`` for practice snakes, or ``"people"`` when only people played;
+``ask_secs`` is the mean time to decide (null when no AI ever answered). Matches kept before people could play together have ``you`` and
 ``ai``/``ais`` instead of ``sides``; :func:`sides_of` reads both.
 """
 
@@ -24,6 +24,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 PRACTICE = "practice"
+PEOPLE = "people"  # no AI snake in the match
 
 
 def data_dir() -> Path:
@@ -89,8 +90,8 @@ def _mean(values: list[float]) -> str:
 
 def board(matches: list[dict[str, Any]], words: dict[str, str]) -> list[ModelRow]:
     """A row per opponent and arena, the most played first. ``words`` names the practice snake
-    (``practice``) and the arena (``mode`` with ``{n}`` snakes, ``mode_people`` with ``{p}``
-    people as well)."""
+    (``practice``), a match of people only (``people_only``) and the arena (``mode`` with ``{n}``
+    snakes, ``mode_people`` with ``{p}`` people as well)."""
     groups: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
     for match in matches:
         sides = sides_of(match)
@@ -111,7 +112,7 @@ def board(matches: list[dict[str, Any]], words: dict[str, str]) -> list[ModelRow
         timed = [float(match["ask_secs"]) for match in played if isinstance(match.get("ask_secs"), (int, float))]
         rows.append(
             ModelRow(
-                model=words["practice"] if model == PRACTICE else model,
+                model={PRACTICE: words["practice"], PEOPLE: words["people_only"]}.get(model, model),
                 arena=(words["mode_people"] if people > 1 else words["mode"]).format(n=snakes, p=people),
                 matches=len(played),
                 you_won=won,

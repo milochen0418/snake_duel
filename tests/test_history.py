@@ -1,6 +1,6 @@
 from snake_duel import history
 
-WORDS = {"practice": "練習蛇", "mode": "{n} 隻蛇", "mode_people": "{n} 隻蛇（{p} 人）"}
+WORDS = {"practice": "練習蛇", "people_only": "只有真人", "mode": "{n} 隻蛇", "mode_people": "{n} 隻蛇（{p} 人）"}
 
 
 def side(score: int, kind: str = "ai", crashes: int = 0) -> dict:
@@ -56,6 +56,11 @@ def test_board_sums_up_each_opponent_and_arena():
     assert (crowd.matches, crowd.you_won, crowd.ai_won, crowd.draws) == (3, 1, 1, 1)
     assert crowd.ai_points == f"{(2 + 4 + 2 + 9 + 9 + 4) / 6:.1f}"
     assert rows[2].ai_won == 1
+
+
+def test_a_match_of_people_only_has_a_row_of_its_own():
+    rows = history.board([match(history.PEOPLE, [5, 3], [])], WORDS)
+    assert (rows[0].model, rows[0].arena, rows[0].ai_points, rows[0].you_won) == ("只有真人", "2 隻蛇（2 人）", "–", 1)
 
 
 def test_matches_kept_before_people_could_play_together_still_count():

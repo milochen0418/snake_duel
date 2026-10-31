@@ -34,8 +34,8 @@ with sync_playwright() as pw:
 
     guest = new_page(browser, errors)
     open_lobby(guest, name="阿美")
-    wait_for(lambda: guest.locator(f"[data-testid=room-row][data-room={code}]").count() == 1, "the room in the lobby's list")
-    assert "小明" in guest.inner_text(f"[data-testid=room-row][data-room={code}]")
+    wait_for(lambda: guest.locator(f"[data-testid=room-row][data-room=\"{code}\"]").count() == 1, "the room in the lobby's list")
+    assert "小明" in guest.inner_text(f"[data-testid=room-row][data-room=\"{code}\"]")
     guest.goto(f"{BASE_URL}/?r={code}", wait_until="domcontentloaded")  # the invite link
     guest.wait_for_selector("[data-testid=room]")
     assert guest.inner_text("[data-testid=code]").strip() == code

@@ -20,6 +20,9 @@ plays don't land on your scoreboard.
 | `play_match` | A whole one-minute match of two at the fast speed, played alone against the practice snake (no AI Hub needed): the countdown over the starting board drawn on the canvas, a turn pressed before the start, the person's snake steered with the arrow keys by the bot, the practice snake's aim and decisions, places with points that add up (apples + 3 × gold − 3 × crashes), the final word, the scoreboard's row. About 70 s. |
 | `play_crowd` | The same alone with the arena set to four snakes, on the 30×20 board: four named snakes, a card and a score per AI snake, each of them heading somewhere of its own and listed by name in the decisions, four places that add up, the person's place in the final word, the scoreboard's row. About 70 s. |
 | `play_together` | Two people in one room (two browser contexts, no AI Hub needed): one opens a room of four, the other finds it in the lobby's list and joins by its link, both see each other, and two AI snakes fill the empty seats. Each page steers its own snake and draws the same board; both get the same four places, each with their own place in the final word; then the host plays on alone and the guest's snake is handed to an AI. About 90 s. |
+| `invite_flows` | A link and a connection, whatever anyone is doing (no AI Hub needed, about 90 s): opened in the middle of your own match, while the room plays, with the host offline, after the room is over; a connection lost mid-match; leaving and reloading; your own settings kept; inviting someone online; typing the code; people only; the end of a match with someone watching. |
+| `signed_in` | (Needs `DDNS_AUTH_SECRET`, the server's own: it signs test cookies, so use it on a local server. Skipped without.) Two accounts by their names and pictures, two tabs of an account as one snake, a guest who signs in keeping their place. |
+| `call_everyone` | (Needs an installed call app, so run it on re-ddns. Skipped without.) Calling everyone in the middle of a match, the incoming call over the game, Join call · 2, and the keys steering the snake with the call in the tray. |
 | `play_ai` | (Needs an AI Hub; skipped without one.) A whole one-minute duel at the slow speed against the hub's model: its decisions come in with words and seconds, its snake heads for the food it named, the result counts its decisions, the model's row on the scoreboard. Give it a quick model (a thinking one only dodges, and the suite fails). |
 
 ## Running
@@ -31,6 +34,8 @@ poetry run ./run_test_suite.sh smoke_home
 poetry run ./run_test_suite.sh play_match
 poetry run ./run_test_suite.sh play_crowd
 poetry run ./run_test_suite.sh play_together
+poetry run ./run_test_suite.sh invite_flows
+DDNS_AUTH_SECRET=test poetry run ./run_test_suite.sh signed_in
 DDNS_AI_HUB_URL=http://127.0.0.1:8182 DDNS_AUTH_SECRET=<the hub's secret> SERVICE_SUBDOMAIN=snake-duel \
   poetry run ./run_test_suite.sh play_ai
 ```
