@@ -25,3 +25,7 @@ venv/
 playwright_user_data/
 testcases/**/output/
 reflex.log
+
+# Film master and copies (the film is on YouTube)
+docs/videos/
+docs/snake-duel-film.en.mp4

@@ -273,12 +273,14 @@ class Game(rx.State):
         auth = await self.get_state(AuthState)
         if not auth._auth_loaded:
             await auth.load_auth()
-        if auth.is_logged_in:
+        if auth.is_logged_in and auth.user_email:
             uid, name, avatar = auth.user_email, auth.user_name or auth.user_email, auth.user_avatar
         else:
             if not self.guest:
                 self.guest = secrets.token_hex(6)
-            uid, name, avatar = f"guest-{self.guest}", self.name or self._guest_name(), ""
+            # A Relack guest is signed in with a nickname and no e-mail: a guest of this tab, by that name.
+            nickname = auth.user_name if auth.is_logged_in else ""
+            uid, name, avatar = f"guest-{self.guest}", nickname or self.name or self._guest_name(), ""
         old, self._uid, self._my_name, self._my_avatar = self._uid, uid, name, avatar
         if old and old != uid:
             rooms.rename(old, uid, name, avatar)

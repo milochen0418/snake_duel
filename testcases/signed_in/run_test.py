@@ -4,7 +4,8 @@ the suite signs its own test cookies with it, so it is for a local server, not a
 Two accounts in one room go by their names and pictures in the room, on the scoreboard, on the
 board and in the result's table, with no name box. All of an account's tabs are one person: a
 second tab of the same account is the same snake, not another seat. A guest who signs in keeps
-their place, and the sign-in link comes back to the room.
+their place, and the sign-in link comes back to the room. A Relack guest (signed in with a nickname
+and no e-mail) goes by that nickname and can play like anyone else.
 """
 
 import base64
@@ -117,5 +118,21 @@ with sync_playwright() as pw:
     assert milo.locator("[data-testid=places] img").count() == 3
     assert "Amy Wu" in milo.inner_text("[data-testid=places]")
     shot(milo, "3_result")
+
+    log("Relack guests: signed in with a nickname and no e-mail")
+    noa = person(browser, errors, "", "Noa")
+    open_lobby(noa)
+    assert noa.inner_text("[data-testid=me-name]") == "Noa"
+    for key in ("foe-practice", "total-3", "host"):
+        noa.click(f"[data-testid={key}]")
+    noa.wait_for_selector("[data-testid=room]")
+    code = noa.inner_text("[data-testid=code]").strip()
+    kim = person(browser, errors, "", "Kim")
+    kim.goto(f"{BASE_URL}/?r={code}", wait_until="domcontentloaded")
+    kim.wait_for_selector("[data-testid=room]")
+    wait_for(lambda: "Kim" in people(noa) and "Noa" in people(kim), "two guests are two people")
+    noa.click("[data-testid=start]")
+    wait_for(lambda: [s["n"] for s in frame(noa)["snakes"]][:2] == ["Noa", "Kim"], "a snake each")
+    assert noa.get_attribute("#arena", "data-me") == "s1" and kim.get_attribute("#arena", "data-me") == "s2"
     browser.close()
 finish(errors)
